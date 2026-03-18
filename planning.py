@@ -58,7 +58,6 @@ def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assig
         while actuel < h_max:
             joueurs_sur_terrain = [nom for nom, etat in etat_joueurs.items() if etat["en_jeu_jusqua"] > actuel]
             
-            # FORMATAGE DE LA PLAGE HORAIRE
             heure_str = actuel.strftime('%H:%M')
             heure_fin_str = (actuel + timedelta(minutes=resolution)).strftime('%H:%M')
             plage_horaire = f"{heure_str} - {heure_fin_str}"
@@ -119,7 +118,7 @@ def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assig
             
             planning_essai.append({
                 "Jour": jour, 
-                "Horaire": plage_horaire, # Utilisation de la plage horaire formattée
+                "Horaire": plage_horaire,
                 "Joueurs_Liste": joueurs_sur_terrain.copy()
             })
             
@@ -165,8 +164,9 @@ st.title("Générateur de Planning Optimisé 🗓️")
 
 with st.sidebar:
     st.header("👑 Accès Admin")
+    # CHANGEMENT DU MOT DE PASSE ICI
     mot_de_passe = st.text_input("Mot de passe", type="password")
-    est_admin = (mot_de_passe == "admin123") 
+    est_admin = (mot_de_passe == "Romarino7") 
 
 # --- VUE 1 : LES JOUEURS ---
 if not est_admin:
@@ -262,13 +262,23 @@ if est_admin:
         st.subheader("Vue d'ensemble des disponibilités")
         if donnees:
             df = pd.DataFrame(donnees)
-            df_display = df[['nom', 'jour', 'debut', 'fin', 't_max_affile', 't_min_base', 'break_min_heavy']]
-            st.dataframe(df_display.sort_values(by=['jour', 'debut']), use_container_width=True)
+            
+            # CHANGEMENT ICI : Renommage et affichage de toutes les colonnes
+            df_display = df.rename(columns={
+                "nom": "Joueur", "jour": "Jour", "debut": "Début", "fin": "Fin",
+                "t_max_affile": "Max Affilée", "t_min_base": "Min Base",
+                "break_min_heavy": "Pause Heavy", "break_max_cond": "Seuil Pause",
+                "t_min_adj": "Min Ajusté"
+            })
+            # On enlève juste l'ID caché pour l'affichage
+            if "id" in df_display.columns:
+                df_display = df_display.drop(columns=["id"])
+                
+            st.dataframe(df_display.sort_values(by=['Jour', 'Début']), use_container_width=True)
             
             st.markdown("---")
             st.subheader("Gestion des créneaux (Suppression)")
             
-            # Création d'un dictionnaire pour lier un label lisible à l'ID du créneau
             options_suppression = {
                 f"{d['nom']} | {d['jour']} de {d['debut']} à {d['fin']}": d['id'] 
                 for d in donnees
@@ -349,7 +359,6 @@ if est_admin:
                 grille_html = generer_grille_html(meilleur_planning, noms_dispos)
                 st.markdown(grille_html, unsafe_allow_html=True)
                 
-                # --- GRAPHIQUE AVANCÉ AVEC ALTAIR ---
                 st.markdown("### 📊 Temps de jeu total (En heures et %)")
                 
                 max_temps_min = max(meilleur_temps.values()) if meilleur_temps else 1
