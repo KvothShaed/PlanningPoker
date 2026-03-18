@@ -4,6 +4,7 @@ import json
 import os
 import random
 import uuid
+import altair as alt
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Planning Optimisé", layout="wide")
@@ -172,27 +173,25 @@ if not est_admin:
         
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.subheader("Ajouter une disponibilité")
-            jours_choisis = st.multiselect("Jours concernés (Vous pouvez en sélectionner plusieurs)", 
+            jours_choisis = st.multiselect("Jours concernés", 
                                            ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
             col1, col2 = st.columns(2)
-            with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time())
-            with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time())
+            # Ajout du pas de 30 minutes (1800 secondes) pour l'input
+            with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
+            with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
                 
             c1, c2 = st.columns(2)
             with c1:
                 temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
                 creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
             with c2: 
-                # CHANGEMENT ICI : value=60
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
             c3, c4 = st.columns(2)
             with c3: 
-                # CHANGEMENT ICI : value=30
                 break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
             with c4: 
-                # CHANGEMENT ICI : value=30
                 creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
             
             if st.form_submit_button("Enregistrer pour ces jours"):
@@ -200,17 +199,30 @@ if not est_admin:
                     st.error("Veuillez sélectionner au moins un jour.")
                 else:
                     donnees = charger_donnees()
+                    ajouts = 0
                     for j in jours_choisis:
-                        donnees.append({
-                            "id": str(uuid.uuid4()),
-                            "nom": nom_joueur.strip(), "jour": j,
-                            "debut": debut.strftime("%H:%M"), "fin": fin.strftime("%H:%M"),
-                            "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
-                            "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
-                            "t_min_adj": creneau_min_adj
-                        })
+                        debut_str = debut.strftime("%H:%M")
+                        fin_str = fin.strftime("%H:%M")
+                        
+                        # ANTI-DOUBLONS : On vérifie si ce créneau exact existe déjà
+                        doublon = any(d["nom"] == nom_joueur.strip() and d["jour"] == j and d["debut"] == debut_str and d["fin"] == fin_str for d in donnees)
+                        
+                        if not doublon:
+                            donnees.append({
+                                "id": str(uuid.uuid4()),
+                                "nom": nom_joueur.strip(), "jour": j,
+                                "debut": debut_str, "fin": fin_str,
+                                "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
+                                "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
+                                "t_min_adj": creneau_min_adj
+                            })
+                            ajouts += 1
+                            
                     sauvegarder_donnees(donnees)
-                    st.success(f"Créneaux ajoutés pour : {', '.join(jours_choisis)} !")
+                    if ajouts > 0:
+                        st.success(f"{ajouts} créneau(x) ajouté(s) !")
+                    else:
+                        st.warning("Ces créneaux exacts étaient déjà enregistrés (Ignorés pour éviter les doublons).")
                     st.rerun()
 
         st.markdown("---")
@@ -276,15 +288,9 @@ if est_admin:
     with tab_gen:
         st.subheader("Lancer l'Optimisation")
         c1, c2, c3 = st.columns(3)
-        with c1: 
-            # CHANGEMENT ICI : value=30
-            resolution = st.number_input("Résolution (min)", value=30, step=5)
-        with c2: 
-            # CHANGEMENT ICI : value=1
-            joueurs_simultanes = st.number_input("Joueurs max", value=1, min_value=1)
-        with c3: 
-            # CHANGEMENT ICI : value=1000
-            iterations = st.number_input("Simulations", value=1000, step=100)
+        with c1: resolution = st.number_input("Résolution (min)", value=30, step=5)
+        with c2: joueurs_simultanes = st.number_input("Joueurs max", value=1, min_value=1)
+        with c3: iterations = st.number_input("Simulations", value=1000, step=100)
 
         if st.button("🚀 Chercher le meilleur planning", type="primary"):
             if not donnees:
@@ -317,5 +323,39 @@ if est_admin:
                 grille_html = generer_grille_html(meilleur_planning, noms_dispos)
                 st.markdown(grille_html, unsafe_allow_html=True)
                 
-                st.markdown("### 📊 Temps de jeu total")
-                st.bar_chart(pd.DataFrame(list(meilleur_temps.items()), columns=["Joueur", "Temps (min)"]).set_index("Joueur"))
+                # --- GRAPHIQUE AVANCÉ AVEC ALTAIR ---
+                st.markdown("### 📊 Temps de jeu total (En heures et %)")
+                
+                # Préparation des données pour le graphique
+                max_temps_min = max(meilleur_temps.values()) if meilleur_temps else 1
+                stats_data = []
+                for joueur, t_min in meilleur_temps.items():
+                    t_heures = t_min / 60.0
+                    pourcentage = (t_min / max_temps_min) * 100 if max_temps_min > 0 else 0
+                    stats_data.append({
+                        "Joueur": joueur,
+                        "Temps (Heures)": round(t_heures, 1),
+                        "Label": f"{round(pourcentage)}%"
+                    })
+                
+                df_stats = pd.DataFrame(stats_data)
+                
+                # Création du graphique à barres
+                base = alt.Chart(df_stats).encode(
+                    x=alt.X('Joueur:O', sort='-y', axis=alt.Axis(labelAngle=0)),
+                    y='Temps (Heures):Q'
+                )
+                barres = base.mark_bar(color='#4C78A8', size=40)
+                
+                # Ajout des labels de pourcentage au-dessus des barres
+                texte = base.mark_text(
+                    align='center',
+                    baseline='bottom',
+                    dy=-5,
+                    fontSize=14,
+                    fontWeight='bold'
+                ).encode(
+                    text='Label:N'
+                )
+                
+                st.altair_chart(barres + texte, use_container_width=True)
