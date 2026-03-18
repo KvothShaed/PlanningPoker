@@ -57,7 +57,11 @@ def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assig
         actuel = h_min
         while actuel < h_max:
             joueurs_sur_terrain = [nom for nom, etat in etat_joueurs.items() if etat["en_jeu_jusqua"] > actuel]
+            
+            # FORMATAGE DE LA PLAGE HORAIRE
             heure_str = actuel.strftime('%H:%M')
+            heure_fin_str = (actuel + timedelta(minutes=resolution)).strftime('%H:%M')
+            plage_horaire = f"{heure_str} - {heure_fin_str}"
             
             for force in assignations_forcees:
                 if force['jour'] == jour and force['heure'] == heure_str:
@@ -114,7 +118,8 @@ def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assig
                         etat["temps_consecutif"] = 0 
             
             planning_essai.append({
-                "Jour": jour, "Horaire": heure_str,
+                "Jour": jour, 
+                "Horaire": plage_horaire, # Utilisation de la plage horaire formattée
                 "Joueurs_Liste": joueurs_sur_terrain.copy()
             })
             
@@ -140,7 +145,7 @@ def generer_grille_html(planning, joueurs_uniques):
     html += "</tr>"
     
     for h in horaires:
-        html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold;'>{h}</td>"
+        html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold; white-space: nowrap;'>{h}</td>"
         for j in jours:
             slot = next((p for p in planning if p["Jour"] == j and p["Horaire"] == h), None)
             html += "<td style='border: 1px solid #ddd; padding: 4px;'>"
@@ -177,7 +182,6 @@ if not est_admin:
                                            ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
             col1, col2 = st.columns(2)
-            # Ajout du pas de 30 minutes (1800 secondes) pour l'input
             with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
             with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
                 
@@ -204,7 +208,6 @@ if not est_admin:
                         debut_str = debut.strftime("%H:%M")
                         fin_str = fin.strftime("%H:%M")
                         
-                        # ANTI-DOUBLONS : On vérifie si ce créneau exact existe déjà
                         doublon = any(d["nom"] == nom_joueur.strip() and d["jour"] == j and d["debut"] == debut_str and d["fin"] == fin_str for d in donnees)
                         
                         if not doublon:
@@ -259,8 +262,31 @@ if est_admin:
         st.subheader("Vue d'ensemble des disponibilités")
         if donnees:
             df = pd.DataFrame(donnees)
-            df = df[['nom', 'jour', 'debut', 'fin', 't_max_affile', 't_min_base', 'break_min_heavy']]
-            st.dataframe(df.sort_values(by=['jour', 'debut']), use_container_width=True)
+            df_display = df[['nom', 'jour', 'debut', 'fin', 't_max_affile', 't_min_base', 'break_min_heavy']]
+            st.dataframe(df_display.sort_values(by=['jour', 'debut']), use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("Gestion des créneaux (Suppression)")
+            
+            # Création d'un dictionnaire pour lier un label lisible à l'ID du créneau
+            options_suppression = {
+                f"{d['nom']} | {d['jour']} de {d['debut']} à {d['fin']}": d['id'] 
+                for d in donnees
+            }
+            
+            creneaux_a_supprimer = st.multiselect(
+                "Sélectionnez un ou plusieurs créneaux à supprimer :", 
+                list(options_suppression.keys())
+            )
+            
+            if st.button("🗑️ Supprimer la sélection", type="primary"):
+                if creneaux_a_supprimer:
+                    for selection in creneaux_a_supprimer:
+                        supprimer_entree(options_suppression[selection])
+                    st.success("Les créneaux sélectionnés ont été supprimés.")
+                    st.rerun()
+                else:
+                    st.warning("Veuillez sélectionner au moins un créneau.")
         else:
             st.warning("Aucune donnée enregistrée.")
 
@@ -268,7 +294,7 @@ if est_admin:
         st.subheader("Forcer des assignations manuelles")
         col_f1, col_f2, col_f3, col_f4 = st.columns([2, 2, 2, 1])
         with col_f1: f_jour = st.selectbox("Jour", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"], key="f_jour")
-        with col_f2: f_heure = st.time_input("Heure de début", value=pd.to_datetime("18:00").time(), key="f_heure")
+        with col_f2: f_heure = st.time_input("Heure de début", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30), key="f_heure")
         with col_f3: f_joueur = st.selectbox("Joueur", noms_dispos if noms_dispos else ["Aucun joueur"], key="f_joueur")
         with col_f4:
             st.write(""); st.write("")
@@ -326,7 +352,6 @@ if est_admin:
                 # --- GRAPHIQUE AVANCÉ AVEC ALTAIR ---
                 st.markdown("### 📊 Temps de jeu total (En heures et %)")
                 
-                # Préparation des données pour le graphique
                 max_temps_min = max(meilleur_temps.values()) if meilleur_temps else 1
                 stats_data = []
                 for joueur, t_min in meilleur_temps.items():
@@ -340,14 +365,12 @@ if est_admin:
                 
                 df_stats = pd.DataFrame(stats_data)
                 
-                # Création du graphique à barres
                 base = alt.Chart(df_stats).encode(
                     x=alt.X('Joueur:O', sort='-y', axis=alt.Axis(labelAngle=0)),
                     y='Temps (Heures):Q'
                 )
                 barres = base.mark_bar(color='#4C78A8', size=40)
                 
-                # Ajout des labels de pourcentage au-dessus des barres
                 texte = base.mark_text(
                     align='center',
                     baseline='bottom',
