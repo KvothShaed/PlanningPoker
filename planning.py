@@ -27,7 +27,7 @@ def supprimer_entree(id_entree):
     donnees = [d for d in donnees if d.get("id") != id_entree]
     sauvegarder_donnees(donnees)
 
-# --- MOTEUR D'OPTIMISATION (Identique) ---
+# --- MOTEUR D'OPTIMISATION ---
 def calculer_score(planning_final, temps_global):
     places_remplies = sum(len(p["Joueurs_Liste"]) for p in planning_final)
     score = places_remplies * 1000 
@@ -58,7 +58,6 @@ def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assig
             joueurs_sur_terrain = [nom for nom, etat in etat_joueurs.items() if etat["en_jeu_jusqua"] > actuel]
             heure_str = actuel.strftime('%H:%M')
             
-            # Injections forcées
             for force in assignations_forcees:
                 if force['jour'] == jour and force['heure'] == heure_str:
                     nom_force = force['nom']
@@ -171,7 +170,6 @@ if not est_admin:
     if nom_joueur.strip():
         st.markdown(f"### Bienvenue {nom_joueur} !")
         
-        # 1. FORMULAIRE D'AJOUT (Avec sélection multiple des jours)
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés (Vous pouvez en sélectionner plusieurs)", 
@@ -185,11 +183,17 @@ if not est_admin:
             with c1:
                 temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
                 creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
-            with c2: break_min_heavy = st.number_input("Pause min après grosse session", value=30, step=15)
+            with c2: 
+                # CHANGEMENT ICI : value=60
+                break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
             c3, c4 = st.columns(2)
-            with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=60, step=15)
-            with c4: creneau_min_adj = st.number_input("...jouer au moins", value=60, step=15)
+            with c3: 
+                # CHANGEMENT ICI : value=30
+                break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
+            with c4: 
+                # CHANGEMENT ICI : value=30
+                creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
             
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
@@ -198,7 +202,7 @@ if not est_admin:
                     donnees = charger_donnees()
                     for j in jours_choisis:
                         donnees.append({
-                            "id": str(uuid.uuid4()), # ID Unique pour la suppression
+                            "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
                             "debut": debut.strftime("%H:%M"), "fin": fin.strftime("%H:%M"),
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
@@ -209,7 +213,6 @@ if not est_admin:
                     st.success(f"Créneaux ajoutés pour : {', '.join(jours_choisis)} !")
                     st.rerun()
 
-        # 2. GESTION DES CRÉNEAUX EXISTANTS
         st.markdown("---")
         st.subheader("Vos créneaux enregistrés")
         donnees = charger_donnees()
@@ -238,14 +241,12 @@ if est_admin:
         st.session_state.assignations_forcees = []
         st.rerun()
 
-    # Utilisation des onglets pour organiser la vue Admin
     tab_liste, tab_force, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "🚀 Génération & Planning"])
 
     with tab_liste:
         st.subheader("Vue d'ensemble des disponibilités")
         if donnees:
             df = pd.DataFrame(donnees)
-            # Réorganisation des colonnes pour la lisibilité
             df = df[['nom', 'jour', 'debut', 'fin', 't_max_affile', 't_min_base', 'break_min_heavy']]
             st.dataframe(df.sort_values(by=['jour', 'debut']), use_container_width=True)
         else:
@@ -275,9 +276,15 @@ if est_admin:
     with tab_gen:
         st.subheader("Lancer l'Optimisation")
         c1, c2, c3 = st.columns(3)
-        with c1: resolution = st.number_input("Résolution (min)", value=15, step=5)
-        with c2: joueurs_simultanes = st.number_input("Joueurs max", value=4, min_value=1)
-        with c3: iterations = st.number_input("Simulations", value=500, step=100)
+        with c1: 
+            # CHANGEMENT ICI : value=30
+            resolution = st.number_input("Résolution (min)", value=30, step=5)
+        with c2: 
+            # CHANGEMENT ICI : value=1
+            joueurs_simultanes = st.number_input("Joueurs max", value=1, min_value=1)
+        with c3: 
+            # CHANGEMENT ICI : value=1000
+            iterations = st.number_input("Simulations", value=1000, step=100)
 
         if st.button("🚀 Chercher le meilleur planning", type="primary"):
             if not donnees:
@@ -306,7 +313,6 @@ if est_admin:
                 barre_progression.progress(1.0)
                 texte_statut.success("Optimisation terminée !")
                 
-                # AFFICHAGE DE LA GRILLE VISUELLE HTML
                 st.markdown("### 📅 Emploi du temps de la semaine")
                 grille_html = generer_grille_html(meilleur_planning, noms_dispos)
                 st.markdown(grille_html, unsafe_allow_html=True)
