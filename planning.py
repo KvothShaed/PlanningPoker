@@ -221,9 +221,14 @@ if not est_admin:
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
+            # On crée la liste des horaires avec 23:59 pour simuler Minuit sans casser les maths
+            liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
+
             col1, col2 = st.columns(2)
-            with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
-            with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
+            with col1: 
+                debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
+            with col2: 
+                fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
             
             st.markdown("#### 🎯 Paramètre Joueur")
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
