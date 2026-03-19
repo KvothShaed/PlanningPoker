@@ -299,23 +299,37 @@ if est_admin:
                 st.session_state.assignations_forcees = []
                 st.rerun()
 
-    with tab_param:
+with tab_param:
         st.subheader("Matrice des Affinités")
         st.write("Définissez vers quels plannings orienter l'algorithme en fonction de la 'Limite Max' choisie par le joueur. *(1 = On évite, 5 = On priorise)*")
         
         affinites_admin = charger_matrice_affinites()
         
         with st.form("form_affinites"):
-            for limite in ["250", "100", "50"]:
-                st.markdown(f"**Pour les joueurs avec Limite Max = {limite} :**")
-                col_a, col_b, col_c = st.columns(3)
-                # Utilisation de .get() pour éviter un plantage si l'ancien fichier config_affinites.json est encore là
-                with col_a: val_250 = st.slider(f"Planning 250 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 250", 3))
-                with col_b: val_100 = st.slider(f"Planning 100 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 100", 3))
-                with col_c: val_50 = st.slider(f"Planning 50 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 50", 3))
-                
-                affinites_admin[limite] = {"Planning 250": val_250, "Planning 100": val_100, "Planning 50": val_50}
-                st.write("") 
+            # --- Pour la limite 250 (Accès à tout) ---
+            st.markdown("**Pour les joueurs avec Limite Max = 250 :**")
+            col_a1, col_b1, col_c1 = st.columns(3)
+            with col_a1: val_250_250 = st.slider("Planning 250", 1, 5, affinites_admin.get("250", {}).get("Planning 250", 3), key="s_250_250")
+            with col_b1: val_100_250 = st.slider("Planning 100", 1, 5, affinites_admin.get("250", {}).get("Planning 100", 3), key="s_100_250")
+            with col_c1: val_50_250 = st.slider("Planning 50", 1, 5, affinites_admin.get("250", {}).get("Planning 50", 3), key="s_50_250")
+            affinites_admin["250"] = {"Planning 250": val_250_250, "Planning 100": val_100_250, "Planning 50": val_50_250}
+            st.write("") 
+            
+            # --- Pour la limite 100 (Accès à 100 et 50) ---
+            st.markdown("**Pour les joueurs avec Limite Max = 100 :**")
+            col_a2, col_b2 = st.columns(2)
+            with col_a2: val_100_100 = st.slider("Planning 100", 1, 5, affinites_admin.get("100", {}).get("Planning 100", 3), key="s_100_100")
+            with col_b2: val_50_100 = st.slider("Planning 50", 1, 5, affinites_admin.get("100", {}).get("Planning 50", 3), key="s_50_100")
+            # Le 250 est forcé à 1 en arrière-plan (même s'il est interdit par ailleurs)
+            affinites_admin["100"] = {"Planning 250": 1, "Planning 100": val_100_100, "Planning 50": val_50_100}
+            st.write("")
+
+            # --- Pour la limite 50 (Accès uniquement à 50) ---
+            st.markdown("**Pour les joueurs avec Limite Max = 50 :**")
+            val_50_50 = st.slider("Planning 50", 1, 5, affinites_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
+            # Le 250 et le 100 sont forcés à 1 en arrière-plan
+            affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
+            st.write("")
                 
             if st.form_submit_button("Enregistrer la matrice", type="primary"):
                 sauvegarder_matrice_affinites(affinites_admin)
