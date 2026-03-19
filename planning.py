@@ -2,14 +2,15 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-import random
 import uuid
+import pulp
 import altair as alt
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Planning Optimisé", layout="wide")
+st.set_page_config(page_title="Planning Optimisé & Multisites", layout="wide")
 
 FICHIER_DONNEES = "dispos_avancees.json"
+PLANNINGS_DISPOS = ["Planning A", "Planning B", "Planning C"]
 
 if 'assignations_forcees' not in st.session_state:
     st.session_state.assignations_forcees = []
@@ -28,125 +29,138 @@ def supprimer_entree(id_entree):
     donnees = [d for d in donnees if d.get("id") != id_entree]
     sauvegarder_donnees(donnees)
 
-# --- MOTEUR D'OPTIMISATION ---
-def calculer_score(planning_final, temps_global):
-    places_remplies = sum(len(p["Joueurs_Liste"]) for p in planning_final)
-    score = places_remplies * 1000 
-    temps_joues = list(temps_global.values())
-    if temps_joues:
-        score -= (max(temps_joues) - min(temps_joues))
-    return score
+# --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
+def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assignations_forcees, jour_cible):
+    """Génère le planning optimal pour UN jour donné en utilisant la programmation linéaire."""
+    if not donnees_jour:
+        return [], {}
 
-def generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, assignations_forcees):
-    planning_essai = []
-    temps_global = {d["nom"]: 0 for d in donnees}
-    jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    # Initialisation du problème (Maximisation du score d'affinité)
+    prob = pulp.LpProblem(f"Optimisation_{jour_cible}", pulp.LpMaximize)
     
-    for jour in jours:
-        dispos_jour = [d for d in donnees if d["jour"] == jour]
-        if not dispos_jour: continue
-        
-        h_min = min([datetime.strptime(d["debut"], "%H:%M") for d in dispos_jour])
-        h_max = max([datetime.strptime(d["fin"], "%H:%M") for d in dispos_jour])
-        
-        etat_joueurs = {
-            d["nom"]: {"en_jeu_jusqua": h_min, "en_pause_jusqua": h_min, "temps_consecutif": 0, "derniere_fin_session": h_min, "contraintes": d} 
-            for d in dispos_jour
-        }
-        
-        actuel = h_min
-        while actuel < h_max:
-            joueurs_sur_terrain = [nom for nom, etat in etat_joueurs.items() if etat["en_jeu_jusqua"] > actuel]
-            
-            heure_str = actuel.strftime('%H:%M')
-            heure_fin_str = (actuel + timedelta(minutes=resolution)).strftime('%H:%M')
-            plage_horaire = f"{heure_str} - {heure_fin_str}"
-            
-            for force in assignations_forcees:
-                if force['jour'] == jour and force['heure'] == heure_str:
-                    nom_force = force['nom']
-                    if nom_force in etat_joueurs and nom_force not in joueurs_sur_terrain:
-                        etat = etat_joueurs[nom_force]
-                        c_rules = etat["contraintes"]
-                        duree_bloc = c_rules["t_min_base"] 
-                        joueurs_sur_terrain.append(nom_force)
-                        etat["en_jeu_jusqua"] = actuel + timedelta(minutes=duree_bloc)
-                        etat["temps_consecutif"] += duree_bloc
-                        etat["derniere_fin_session"] = etat["en_jeu_jusqua"]
-                        temps_global[nom_force] += duree_bloc
-            
-            places_restantes = joueurs_simultanes - len(joueurs_sur_terrain)
-            
-            if places_restantes > 0:
-                candidats_valides = []
-                for d in dispos_jour:
-                    nom = d["nom"]
-                    etat = etat_joueurs[nom]
-                    if nom in joueurs_sur_terrain: continue
-                        
-                    d_deb = datetime.strptime(d["debut"], "%H:%M")
-                    d_fin = datetime.strptime(d["fin"], "%H:%M")
-                    if d_deb > actuel or d_fin <= actuel: continue
-                    if etat["en_pause_jusqua"] > actuel: continue
-                        
-                    pause_subie = (actuel - etat["derniere_fin_session"]).total_seconds() / 60
-                    duree_bloc = d["t_min_base"]
-                    if 0 < pause_subie <= d["break_max_cond"]:
-                        duree_bloc = max(d["t_min_base"], d["t_min_adj"])
-                        
-                    if etat["temps_consecutif"] + duree_bloc > d["t_max_affile"]: continue
-                    if actuel + timedelta(minutes=duree_bloc) > d_fin: continue 
-                        
-                    candidats_valides.append((nom, duree_bloc))
-                
-                random.shuffle(candidats_valides)
-                candidats_valides.sort(key=lambda x: temps_global[x[0]] + random.randint(0, 30)) 
-                
-                for cand_nom, duree_bloc in candidats_valides[:places_restantes]:
-                    joueurs_sur_terrain.append(cand_nom)
-                    etat = etat_joueurs[cand_nom]
-                    c_rules = etat["contraintes"]
-                    
-                    etat["en_jeu_jusqua"] = actuel + timedelta(minutes=duree_bloc)
-                    etat["temps_consecutif"] += duree_bloc
-                    etat["derniere_fin_session"] = etat["en_jeu_jusqua"]
-                    temps_global[cand_nom] += duree_bloc
-                    
-                    if etat["temps_consecutif"] >= (c_rules["t_max_affile"] * 0.75):
-                        etat["en_pause_jusqua"] = etat["en_jeu_jusqua"] + timedelta(minutes=c_rules["break_min_heavy"])
-                        etat["temps_consecutif"] = 0 
-            
-            planning_essai.append({
-                "Jour": jour, 
-                "Horaire": plage_horaire,
-                "Joueurs_Liste": joueurs_sur_terrain.copy()
-            })
-            
-            actuel += timedelta(minutes=resolution)
-            for nom, etat in etat_joueurs.items():
-                if nom not in joueurs_sur_terrain and etat["temps_consecutif"] > 0 and actuel >= etat["en_pause_jusqua"]:
-                     if (actuel - etat["derniere_fin_session"]).total_seconds() / 60 >= 30:
-                         etat["temps_consecutif"] = 0
+    h_min = min([datetime.strptime(d["debut"], "%H:%M") for d in donnees_jour])
+    h_max = max([datetime.strptime(d["fin"], "%H:%M") for d in donnees_jour])
+    
+    creneaux = []
+    actuel = h_min
+    while actuel < h_max:
+        creneaux.append(actuel.strftime('%H:%M'))
+        actuel += timedelta(minutes=resolution)
 
-    return planning_essai, temps_global
+    joueurs_data = {d["nom"]: d for d in donnees_jour}
+    joueurs = list(joueurs_data.keys())
+    
+    # Variables de décision
+    # X[j, p, c] = 1 si le joueur j est sur le planning p au créneau c
+    X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux), cat='Binary')
+    
+    # Y[j, c] = 1 si le joueur j joue n'importe où au créneau c
+    Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux), cat='Binary')
 
-# --- GÉNÉRATEUR VISUEL (Tableau HTML avec Couleurs) ---
+    # Lien entre X et Y : Y = somme(X) sur les plannings
+    for c in creneaux:
+        for j in joueurs:
+            prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
+            # Unicité : Un joueur ne peut être que sur UN SEUL planning à la fois
+            prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
+
+    # Fonction Objectif : Maximiser les affinités
+    objectif = []
+    for j, d in joueurs_data.items():
+        prefs = {PLANNINGS_DISPOS[0]: d.get("pref_A", 3), 
+                 PLANNINGS_DISPOS[1]: d.get("pref_B", 3), 
+                 PLANNINGS_DISPOS[2]: d.get("pref_C", 3)}
+        
+        for c in creneaux:
+            if d["debut"] <= c < d["fin"]:
+                for p in PLANNINGS_DISPOS:
+                    objectif.append(prefs[p] * X[j, p, c])
+            else:
+                # Indisponible : forcé à 0
+                prob += Y[j, c] == 0, f"Indispo_{j}_{c}"
+                
+    prob += pulp.lpSum(objectif)
+
+    # Contraintes Globales
+    for c in creneaux:
+        for p in PLANNINGS_DISPOS:
+            # Capacité Max par planning
+            prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
+
+    # Contraintes Individuelles (Temps d'affilée, temps min)
+    for j, d in joueurs_data.items():
+        max_slots = int(d["t_max_affile"] / resolution)
+        min_slots = int(d["t_min_base"] / resolution)
+        
+        # 1. Max d'affilée (Fenêtre glissante)
+        if max_slots > 0 and len(creneaux) > max_slots:
+            for i in range(len(creneaux) - max_slots):
+                prob += pulp.lpSum(Y[j, creneaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_Affile_{j}_{i}"
+                
+        # 2. Minimum de temps par session
+        if min_slots > 1:
+            for i in range(1, len(creneaux) - min_slots + 1):
+                # Si le joueur commence à jouer (Y[i] - Y[i-1] == 1)
+                start_var = Y[j, creneaux[i]] - Y[j, creneaux[i-1]]
+                for k in range(1, min_slots):
+                    # Il doit jouer les slots suivants
+                    prob += start_var <= Y[j, creneaux[i+k]], f"Min_Base_{j}_{i}_{k}"
+
+    # Assignations forcées de l'admin
+    for force in assignations_forcees:
+        if force['jour'] == jour_cible and force['nom'] in joueurs and force['heure'] in creneaux:
+            p_force = force['planning']
+            prob += X[force['nom'], p_force, force['heure']] == 1, f"Force_{force['nom']}_{force['heure']}"
+
+    # Résolution
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    
+    # Reconstruction
+    planning_jour = []
+    temps_global = {j: 0 for j in joueurs}
+    
+    if pulp.LpStatus[prob.status] == 'Optimal':
+        for c in creneaux:
+            for p in PLANNINGS_DISPOS:
+                joueurs_assignes = [j for j in joueurs if pulp.value(X[j, p, c]) == 1]
+                if joueurs_assignes:
+                    planning_jour.append({
+                        "Jour": jour_cible,
+                        "Horaire": c,
+                        "Planning": p,
+                        "Joueurs_Liste": joueurs_assignes
+                    })
+                    for j in joueurs_assignes:
+                        temps_global[j] += resolution
+
+    return planning_jour, temps_global
+
+# --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques):
+    if not planning:
+        return "<p>Aucun planning généré.</p>"
+        
     couleurs = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF", "#FFFFFC"]
     map_couleurs = {j: couleurs[i % len(couleurs)] for i, j in enumerate(joueurs_uniques)}
     
-    jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    jours = sorted(list(set([p["Jour"] for p in planning])))
     horaires = sorted(list(set([p["Horaire"] for p in planning])))
     
     html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif;'>"
     html += "<tr><th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
-    for j in jours: html += f"<th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}</th>"
+    
+    # En-têtes : Jours + Plannings
+    colonnes = []
+    for j in jours:
+        for p in PLANNINGS_DISPOS:
+            colonnes.append((j, p))
+            html += f"<th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}<br><small>{p}</small></th>"
     html += "</tr>"
     
     for h in horaires:
         html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold; white-space: nowrap;'>{h}</td>"
-        for j in jours:
-            slot = next((p for p in planning if p["Jour"] == j and p["Horaire"] == h), None)
+        for j, p in colonnes:
+            slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h and item["Planning"] == p), None)
             html += "<td style='border: 1px solid #ddd; padding: 4px;'>"
             if slot and slot["Joueurs_Liste"]:
                 for joueur in slot["Joueurs_Liste"]:
@@ -160,31 +174,36 @@ def generer_grille_html(planning, joueurs_uniques):
 # ==========================================
 # INTERFACE UTILISATEUR
 # ==========================================
-st.title("Générateur de Planning Optimisé 🗓️")
+st.title("Générateur de Planning Multi-Sites Optimisé 🗓️")
 
 with st.sidebar:
     st.header("👑 Accès Admin")
-    # CHANGEMENT DU MOT DE PASSE ICI
     mot_de_passe = st.text_input("Mot de passe", type="password")
     est_admin = (mot_de_passe == "Romarino7") 
 
 # --- VUE 1 : LES JOUEURS ---
 if not est_admin:
     st.header("👤 Espace Joueur")
-    nom_joueur = st.text_input("Identifiez-vous (Votre Pseudo) :")
+    nom_joueur = st.text_input("Identifiez-vous (Votre Prénom / Nom) :")
     
     if nom_joueur.strip():
         st.markdown(f"### Bienvenue {nom_joueur} !")
         
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.subheader("Ajouter une disponibilité")
-            jours_choisis = st.multiselect("Jours concernés", 
-                                           ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
+            jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
             col1, col2 = st.columns(2)
             with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
             with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
+            
+            st.markdown("#### 🎯 Vos Affinités (1 = Je ne veux pas, 5 = J'adore)")
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1: pref_A = st.slider("Planning A", 1, 5, 3)
+            with col_p2: pref_B = st.slider("Planning B", 1, 5, 3)
+            with col_p3: pref_C = st.slider("Planning C", 1, 5, 3)
                 
+            st.markdown("#### ⚙️ Contraintes de rythme")
             c1, c2 = st.columns(2)
             with c1:
                 temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
@@ -193,39 +212,29 @@ if not est_admin:
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
             c3, c4 = st.columns(2)
-            with c3: 
-                break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
-            with c4: 
-                creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
+            with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
+            with c4: creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
             
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
                     st.error("Veuillez sélectionner au moins un jour.")
                 else:
                     donnees = charger_donnees()
-                    ajouts = 0
                     for j in jours_choisis:
                         debut_str = debut.strftime("%H:%M")
                         fin_str = fin.strftime("%H:%M")
                         
-                        doublon = any(d["nom"] == nom_joueur.strip() and d["jour"] == j and d["debut"] == debut_str and d["fin"] == fin_str for d in donnees)
-                        
-                        if not doublon:
-                            donnees.append({
-                                "id": str(uuid.uuid4()),
-                                "nom": nom_joueur.strip(), "jour": j,
-                                "debut": debut_str, "fin": fin_str,
-                                "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
-                                "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
-                                "t_min_adj": creneau_min_adj
-                            })
-                            ajouts += 1
-                            
+                        donnees.append({
+                            "id": str(uuid.uuid4()),
+                            "nom": nom_joueur.strip(), "jour": j,
+                            "debut": debut_str, "fin": fin_str,
+                            "pref_A": pref_A, "pref_B": pref_B, "pref_C": pref_C,
+                            "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
+                            "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
+                            "t_min_adj": creneau_min_adj
+                        })
                     sauvegarder_donnees(donnees)
-                    if ajouts > 0:
-                        st.success(f"{ajouts} créneau(x) ajouté(s) !")
-                    else:
-                        st.warning("Ces créneaux exacts étaient déjà enregistrés (Ignorés pour éviter les doublons).")
+                    st.success("Créneaux et affinités ajoutés !")
                     st.rerun()
 
         st.markdown("---")
@@ -233,15 +242,13 @@ if not est_admin:
         donnees = charger_donnees()
         mes_dispos = [d for d in donnees if d["nom"] == nom_joueur.strip()]
         
-        if not mes_dispos:
-            st.info("Vous n'avez pas encore renseigné de disponibilités.")
-        else:
+        if mes_dispos:
             for d in mes_dispos:
                 col_info, col_btn = st.columns([4, 1])
                 with col_info:
-                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(Max: {d['t_max_affile']}min, Min: {d['t_min_base']}min)*")
+                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(A:{d['pref_A']} B:{d['pref_B']} C:{d['pref_C']})*")
                 with col_btn:
-                    if st.button("❌ Supprimer", key=d["id"]):
+                    if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
                         st.rerun()
 
@@ -259,135 +266,74 @@ if est_admin:
     tab_liste, tab_force, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "🚀 Génération & Planning"])
 
     with tab_liste:
-        st.subheader("Vue d'ensemble des disponibilités")
         if donnees:
             df = pd.DataFrame(donnees)
+            st.dataframe(df.drop(columns=["id"]), use_container_width=True)
             
-            # CHANGEMENT ICI : Renommage et affichage de toutes les colonnes
-            df_display = df.rename(columns={
-                "nom": "Joueur", "jour": "Jour", "debut": "Début", "fin": "Fin",
-                "t_max_affile": "Max Affilée", "t_min_base": "Min Base",
-                "break_min_heavy": "Pause Heavy", "break_max_cond": "Seuil Pause",
-                "t_min_adj": "Min Ajusté"
-            })
-            # On enlève juste l'ID caché pour l'affichage
-            if "id" in df_display.columns:
-                df_display = df_display.drop(columns=["id"])
-                
-            st.dataframe(df_display.sort_values(by=['Jour', 'Début']), use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("Gestion des créneaux (Suppression)")
-            
-            options_suppression = {
-                f"{d['nom']} | {d['jour']} de {d['debut']} à {d['fin']}": d['id'] 
-                for d in donnees
-            }
-            
-            creneaux_a_supprimer = st.multiselect(
-                "Sélectionnez un ou plusieurs créneaux à supprimer :", 
-                list(options_suppression.keys())
-            )
-            
-            if st.button("🗑️ Supprimer la sélection", type="primary"):
-                if creneaux_a_supprimer:
-                    for selection in creneaux_a_supprimer:
-                        supprimer_entree(options_suppression[selection])
-                    st.success("Les créneaux sélectionnés ont été supprimés.")
-                    st.rerun()
-                else:
-                    st.warning("Veuillez sélectionner au moins un créneau.")
-        else:
-            st.warning("Aucune donnée enregistrée.")
+            options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees}
+            creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
+            if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
+                for sel in creneaux_a_supprimer: supprimer_entree(options_suppression[sel])
+                st.rerun()
 
     with tab_force:
         st.subheader("Forcer des assignations manuelles")
-        col_f1, col_f2, col_f3, col_f4 = st.columns([2, 2, 2, 1])
-        with col_f1: f_jour = st.selectbox("Jour", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"], key="f_jour")
-        with col_f2: f_heure = st.time_input("Heure de début", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30), key="f_heure")
-        with col_f3: f_joueur = st.selectbox("Joueur", noms_dispos if noms_dispos else ["Aucun joueur"], key="f_joueur")
-        with col_f4:
+        col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns([2, 2, 2, 2, 1])
+        with col_f1: f_jour = st.selectbox("Jour", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
+        with col_f2: f_heure = st.time_input("Heure", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
+        with col_f3: f_joueur = st.selectbox("Joueur", noms_dispos if noms_dispos else ["Aucun"])
+        with col_f4: f_planning = st.selectbox("Planning", PLANNINGS_DISPOS)
+        with col_f5:
             st.write(""); st.write("")
-            if st.button("➕ Ajouter"):
-                if f_joueur != "Aucun joueur":
-                    st.session_state.assignations_forcees.append({"jour": f_jour, "heure": f_heure.strftime("%H:%M"), "nom": f_joueur})
-                    st.success(f"Ajouté : {f_joueur}")
+            if st.button("➕ Ajouter") and f_joueur != "Aucun":
+                st.session_state.assignations_forcees.append({"jour": f_jour, "heure": f_heure.strftime("%H:%M"), "nom": f_joueur, "planning": f_planning})
+                st.success("Ajouté")
         
         if st.session_state.assignations_forcees:
-            st.write("**Règles manuelles actives :**")
-            for regle in st.session_state.assignations_forcees:
-                st.caption(f"- {regle['nom']} le {regle['jour']} à {regle['heure']}")
-            if st.button("Effacer les règles manuelles"):
+            for r in st.session_state.assignations_forcees:
+                st.caption(f"- {r['nom']} le {r['jour']} à {r['heure']} sur {r['planning']}")
+            if st.button("Effacer les règles"):
                 st.session_state.assignations_forcees = []
                 st.rerun()
 
     with tab_gen:
-        st.subheader("Lancer l'Optimisation")
-        c1, c2, c3 = st.columns(3)
+        st.subheader("Lancer l'Optimisation Mathématique (PuLP)")
+        c1, c2 = st.columns(2)
         with c1: resolution = st.number_input("Résolution (min)", value=30, step=5)
-        with c2: joueurs_simultanes = st.number_input("Joueurs max", value=1, min_value=1)
-        with c3: iterations = st.number_input("Simulations", value=1000, step=100)
+        with c2: joueurs_simultanes = st.number_input("Joueurs max par planning", value=1, min_value=1)
 
-        if st.button("🚀 Chercher le meilleur planning", type="primary"):
+        if st.button("🚀 Résoudre le planning", type="primary"):
             if not donnees:
                 st.error("Aucune donnée.")
             else:
-                meilleur_planning = None
-                meilleur_score = -float('inf')
-                meilleur_temps = None
+                planning_complet = []
+                temps_totaux = {j: 0 for j in noms_dispos}
                 
-                barre_progression = st.progress(0)
-                texte_statut = st.empty()
+                jours_presents = list(set([d["jour"] for d in donnees]))
                 
-                for i in range(iterations):
-                    planning_test, temps_test = generer_un_planning_aleatoire(donnees, resolution, joueurs_simultanes, st.session_state.assignations_forcees)
-                    score = calculer_score(planning_test, temps_test)
-                    
-                    if score > meilleur_score:
-                        meilleur_score = score
-                        meilleur_planning = planning_test
-                        meilleur_temps = temps_test
-                        
-                    if i % 10 == 0:
-                        barre_progression.progress(i / iterations)
-                        texte_statut.write(f"Simulation en cours... (Score actuel : {meilleur_score})")
+                with st.spinner('Le solveur mathématique calcule l\'optimum absolu...'):
+                    # L'optimisation se fait jour par jour
+                    for jour in jours_presents:
+                        donnees_jour = [d for d in donnees if d["jour"] == jour]
+                        planning_j, temps_j = optimiser_planning_pulp(
+                            donnees_jour, resolution, joueurs_simultanes, 
+                            st.session_state.assignations_forcees, jour
+                        )
+                        planning_complet.extend(planning_j)
+                        for j, t in temps_j.items():
+                            temps_totaux[j] += t
                 
-                barre_progression.progress(1.0)
-                texte_statut.success("Optimisation terminée !")
+                st.success("Planning optimal trouvé !")
                 
-                st.markdown("### 📅 Emploi du temps de la semaine")
-                grille_html = generer_grille_html(meilleur_planning, noms_dispos)
-                st.markdown(grille_html, unsafe_allow_html=True)
+                st.markdown("### 📅 Emploi du temps")
+                st.markdown(generer_grille_html(planning_complet, noms_dispos), unsafe_allow_html=True)
                 
-                st.markdown("### 📊 Temps de jeu total (En heures et %)")
-                
-                max_temps_min = max(meilleur_temps.values()) if meilleur_temps else 1
-                stats_data = []
-                for joueur, t_min in meilleur_temps.items():
-                    t_heures = t_min / 60.0
-                    pourcentage = (t_min / max_temps_min) * 100 if max_temps_min > 0 else 0
-                    stats_data.append({
-                        "Joueur": joueur,
-                        "Temps (Heures)": round(t_heures, 1),
-                        "Label": f"{round(pourcentage)}%"
-                    })
-                
-                df_stats = pd.DataFrame(stats_data)
-                
-                base = alt.Chart(df_stats).encode(
-                    x=alt.X('Joueur:O', sort='-y', axis=alt.Axis(labelAngle=0)),
-                    y='Temps (Heures):Q'
-                )
-                barres = base.mark_bar(color='#4C78A8', size=40)
-                
-                texte = base.mark_text(
-                    align='center',
-                    baseline='bottom',
-                    dy=-5,
-                    fontSize=14,
-                    fontWeight='bold'
-                ).encode(
-                    text='Label:N'
-                )
-                
-                st.altair_chart(barres + texte, use_container_width=True)
+                st.markdown("### 📊 Temps de jeu total")
+                stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in temps_totaux.items() if t > 0]
+                if stats_data:
+                    df_stats = pd.DataFrame(stats_data)
+                    barres = alt.Chart(df_stats).mark_bar().encode(
+                        x=alt.X('Joueur:O', sort='-y'),
+                        y='Temps (Heures):Q'
+                    )
+                    st.altair_chart(barres, use_container_width=True)
