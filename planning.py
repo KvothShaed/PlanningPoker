@@ -142,34 +142,59 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     return planning_jour, temps_global
 
 # --- GÉNÉRATEUR VISUEL ---
-def generer_grille_html(planning, joueurs_uniques):
+# --- GÉNÉRATEUR VISUEL ---
+def generer_grille_html(planning, joueurs_uniques, resolution):
     if not planning: return "<p>Aucun planning généré.</p>"
     couleurs = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF", "#FFFFFC"]
     map_couleurs = {j: couleurs[i % len(couleurs)] for i, j in enumerate(joueurs_uniques)}
     
-    jours = sorted(list(set([p["Jour"] for p in planning])))
-    horaires = sorted(list(set([p["Horaire"] for p in planning])))
+    # Tri des jours dans le bon ordre chronologique
+    ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
+    jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
     
-    html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif;'>"
-    html += "<tr><th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
+    # Tri des horaires
+    horaires_str = sorted(list(set([p["Horaire"] for p in planning])))
     
-    colonnes = []
+    # Thème de couleurs pour les colonnes
+    couleurs_colonnes = {"Planning 250": "#ffebee", "Planning 100": "#e8f5e9", "Planning 50": "#e3f2fd"}
+    couleurs_cellules = {"Planning 250": "#fffafb", "Planning 100": "#fafffa", "Planning 50": "#fbfdff"}
+    
+    html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif; color: #333;'>"
+    
+    # Ligne 1 : Les Jours (Fusionnés)
+    html += "<tr><th rowspan='2' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
     for j in jours:
-        for p in PLANNINGS_DISPOS:
-            colonnes.append((j, p))
-            html += f"<th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}<br><small>{p}</small></th>"
+        html += f"<th colspan='3' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}</th>"
     html += "</tr>"
     
-    for h in horaires:
-        html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold; white-space: nowrap;'>{h}</td>"
-        for j, p in colonnes:
-            slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h and item["Planning"] == p), None)
-            html += "<td style='border: 1px solid #ddd; padding: 4px;'>"
-            if slot and slot["Joueurs_Liste"]:
-                for joueur in slot["Joueurs_Liste"]:
-                    c = map_couleurs.get(joueur, "#eee")
-                    html += f"<div style='background-color: {c}; color: #000; margin: 2px; padding: 4px; border-radius: 6px; font-size: 0.85em; font-weight: 500;'>{joueur}</div>"
-            html += "</td>"
+    # Ligne 2 : Les Limites (Sous-colonnes)
+    html += "<tr>"
+    for j in jours:
+        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 250']};'>250</th>"
+        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 100']};'>100</th>"
+        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 50']};'>50</th>"
+    html += "</tr>"
+    
+    # Contenu du tableau
+    for h_str in horaires_str:
+        # Calcul de la plage horaire (ex: 08:00 - 08:30)
+        h_obj = datetime.strptime(h_str, '%H:%M')
+        h_fin_str = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
+        plage_horaire = f"{h_str} - {h_fin_str}"
+        
+        html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold; white-space: nowrap; background-color: #fafafa;'>{plage_horaire}</td>"
+        
+        for j in jours:
+            for p in ["Planning 250", "Planning 100", "Planning 50"]:
+                slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
+                bg_color = couleurs_cellules[p]
+                
+                html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {bg_color};'>"
+                if slot and slot["Joueurs_Liste"]:
+                    for joueur in slot["Joueurs_Liste"]:
+                        c = map_couleurs.get(joueur, "#eee")
+                        html += f"<div style='background-color: {c}; color: #000; margin: 2px; padding: 4px; border-radius: 6px; font-size: 0.85em; font-weight: 500;'>{joueur}</div>"
+                html += "</td>"
         html += "</tr>"
     html += "</table>"
     return html
