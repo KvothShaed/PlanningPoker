@@ -299,7 +299,7 @@ if est_admin:
                 st.session_state.assignations_forcees = []
                 st.rerun()
 
-with tab_param:
+    with tab_param:
         st.subheader("Matrice des Affinités")
         st.write("Définissez vers quels plannings orienter l'algorithme en fonction de la 'Limite Max' choisie par le joueur. *(1 = On évite, 5 = On priorise)*")
         
