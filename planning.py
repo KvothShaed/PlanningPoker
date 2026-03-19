@@ -389,7 +389,7 @@ if est_admin:
                 st.success("Planning optimal trouvé !")
                 
                 st.markdown("### 📅 Emploi du temps")
-                st.markdown(generer_grille_html(planning_complet, noms_dispos), unsafe_allow_html=True)
+                st.markdown(generer_grille_html(planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
                 
                 st.markdown("### 📊 Temps de jeu total")
                 stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in temps_totaux.items() if t > 0]
