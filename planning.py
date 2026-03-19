@@ -43,6 +43,7 @@ def sauvegarder_matrice_affinites(data):
     with open(FICHIER_AFFINITES, "w") as f: json.dump(data, f)
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
+# --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
 def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assignations_forcees, jour_cible, matrice_affinites):
     if not donnees_jour:
         return [], {}
@@ -64,6 +65,13 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux), cat='Binary')
 
+    # Dictionnaire des règles d'accès stricts (Contraintes dures)
+    plannings_autorises = {
+        "250": ["Planning 250", "Planning 100", "Planning 50"],
+        "100": ["Planning 100", "Planning 50"],
+        "50":  ["Planning 50"]
+    }
+
     for c in creneaux:
         for j in joueurs:
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
@@ -73,13 +81,17 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     for j, d in joueurs_data.items():
         limite_joueur = str(d.get("limite_max", 250))
         prefs_admin = matrice_affinites.get(limite_joueur, {"Planning 250": 1, "Planning 100": 1, "Planning 50": 1})
+        autorises = plannings_autorises.get(limite_joueur, PLANNINGS_DISPOS) # Sécurité
         
         for c in creneaux:
             if d["debut"] <= c < d["fin"]:
                 for p in PLANNINGS_DISPOS:
-                    # On sécurise avec un .get() au cas où la matrice du JSON n'est pas à jour
-                    valeur_pref = prefs_admin.get(p, 1)
-                    objectif.append(valeur_pref * X[j, p, c])
+                    # NOUVEAU : On interdit formellement les plannings non autorisés
+                    if p not in autorises:
+                        prob += X[j, p, c] == 0, f"Interdit_{j}_{p}_{c}"
+                    else:
+                        valeur_pref = prefs_admin.get(p, 1)
+                        objectif.append(valeur_pref * X[j, p, c])
             else:
                 prob += Y[j, c] == 0, f"Indispo_{j}_{c}"
                 
