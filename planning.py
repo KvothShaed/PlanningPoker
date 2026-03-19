@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Planning Optimisé & Multisites", layout="wide")
 
 FICHIER_DONNEES = "dispos_avancees.json"
+FICHIER_AFFINITES = "config_affinites.json"
 PLANNINGS_DISPOS = ["Planning A", "Planning B", "Planning C"]
 
 if 'assignations_forcees' not in st.session_state:
@@ -29,13 +30,25 @@ def supprimer_entree(id_entree):
     donnees = [d for d in donnees if d.get("id") != id_entree]
     sauvegarder_donnees(donnees)
 
+def charger_matrice_affinites():
+    # Si le fichier n'existe pas, on crée une matrice neutre par défaut
+    if os.path.exists(FICHIER_AFFINITES):
+        with open(FICHIER_AFFINITES, "r") as f: return json.load(f)
+    return {
+        "250": {"Planning A": 3, "Planning B": 3, "Planning C": 3},
+        "100": {"Planning A": 3, "Planning B": 3, "Planning C": 3},
+        "50": {"Planning A": 3, "Planning B": 3, "Planning C": 3}
+    }
+
+def sauvegarder_matrice_affinites(data):
+    with open(FICHIER_AFFINITES, "w") as f: json.dump(data, f)
+
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
-def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assignations_forcees, jour_cible):
+def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assignations_forcees, jour_cible, matrice_affinites):
     """Génère le planning optimal pour UN jour donné en utilisant la programmation linéaire."""
     if not donnees_jour:
         return [], {}
 
-    # Initialisation du problème (Maximisation du score d'affinité)
     prob = pulp.LpProblem(f"Optimisation_{jour_cible}", pulp.LpMaximize)
     
     h_min = min([datetime.strptime(d["debut"], "%H:%M") for d in donnees_jour])
@@ -50,72 +63,59 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     joueurs_data = {d["nom"]: d for d in donnees_jour}
     joueurs = list(joueurs_data.keys())
     
-    # Variables de décision
-    # X[j, p, c] = 1 si le joueur j est sur le planning p au créneau c
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux), cat='Binary')
-    
-    # Y[j, c] = 1 si le joueur j joue n'importe où au créneau c
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux), cat='Binary')
 
-    # Lien entre X et Y : Y = somme(X) sur les plannings
     for c in creneaux:
         for j in joueurs:
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
-            # Unicité : Un joueur ne peut être que sur UN SEUL planning à la fois
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
-    # Fonction Objectif : Maximiser les affinités
+    # Fonction Objectif : Maximiser les affinités basées sur la Limite Max
     objectif = []
     for j, d in joueurs_data.items():
-        prefs = {PLANNINGS_DISPOS[0]: d.get("pref_A", 3), 
-                 PLANNINGS_DISPOS[1]: d.get("pref_B", 3), 
-                 PLANNINGS_DISPOS[2]: d.get("pref_C", 3)}
+        # On récupère la limite max du joueur, convertie en string pour lire le JSON de l'admin
+        limite_joueur = str(d.get("limite_max", 250))
+        
+        # Si pour une raison ou une autre la limite n'est pas dans la matrice, on sécurise
+        prefs_admin = matrice_affinites.get(limite_joueur, {"Planning A": 1, "Planning B": 1, "Planning C": 1})
         
         for c in creneaux:
             if d["debut"] <= c < d["fin"]:
                 for p in PLANNINGS_DISPOS:
-                    objectif.append(prefs[p] * X[j, p, c])
+                    # On injecte les points définis par l'admin dans l'équation
+                    objectif.append(prefs_admin[p] * X[j, p, c])
             else:
-                # Indisponible : forcé à 0
                 prob += Y[j, c] == 0, f"Indispo_{j}_{c}"
                 
     prob += pulp.lpSum(objectif)
 
-    # Contraintes Globales
+    # Contraintes Globales et Individuelles
     for c in creneaux:
         for p in PLANNINGS_DISPOS:
-            # Capacité Max par planning
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
 
-    # Contraintes Individuelles (Temps d'affilée, temps min)
     for j, d in joueurs_data.items():
         max_slots = int(d["t_max_affile"] / resolution)
         min_slots = int(d["t_min_base"] / resolution)
         
-        # 1. Max d'affilée (Fenêtre glissante)
         if max_slots > 0 and len(creneaux) > max_slots:
             for i in range(len(creneaux) - max_slots):
                 prob += pulp.lpSum(Y[j, creneaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_Affile_{j}_{i}"
                 
-        # 2. Minimum de temps par session
         if min_slots > 1:
             for i in range(1, len(creneaux) - min_slots + 1):
-                # Si le joueur commence à jouer (Y[i] - Y[i-1] == 1)
                 start_var = Y[j, creneaux[i]] - Y[j, creneaux[i-1]]
                 for k in range(1, min_slots):
-                    # Il doit jouer les slots suivants
                     prob += start_var <= Y[j, creneaux[i+k]], f"Min_Base_{j}_{i}_{k}"
 
-    # Assignations forcées de l'admin
     for force in assignations_forcees:
         if force['jour'] == jour_cible and force['nom'] in joueurs and force['heure'] in creneaux:
             p_force = force['planning']
             prob += X[force['nom'], p_force, force['heure']] == 1, f"Force_{force['nom']}_{force['heure']}"
 
-    # Résolution
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
-    # Reconstruction
     planning_jour = []
     temps_global = {j: 0 for j in joueurs}
     
@@ -137,9 +137,7 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
 
 # --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques):
-    if not planning:
-        return "<p>Aucun planning généré.</p>"
-        
+    if not planning: return "<p>Aucun planning généré.</p>"
     couleurs = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF", "#FFFFFC"]
     map_couleurs = {j: couleurs[i % len(couleurs)] for i, j in enumerate(joueurs_uniques)}
     
@@ -149,7 +147,6 @@ def generer_grille_html(planning, joueurs_uniques):
     html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif;'>"
     html += "<tr><th style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
     
-    # En-têtes : Jours + Plannings
     colonnes = []
     for j in jours:
         for p in PLANNINGS_DISPOS:
@@ -197,11 +194,8 @@ if not est_admin:
             with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
             with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
             
-            st.markdown("#### 🎯 Vos Affinités (1 = Je ne veux pas, 5 = J'adore)")
-            col_p1, col_p2, col_p3 = st.columns(3)
-            with col_p1: pref_A = st.slider("Planning A", 1, 5, 3)
-            with col_p2: pref_B = st.slider("Planning B", 1, 5, 3)
-            with col_p3: pref_C = st.slider("Planning C", 1, 5, 3)
+            st.markdown("#### 🎯 Paramètre Joueur")
+            limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
                 
             st.markdown("#### ⚙️ Contraintes de rythme")
             c1, c2 = st.columns(2)
@@ -221,20 +215,17 @@ if not est_admin:
                 else:
                     donnees = charger_donnees()
                     for j in jours_choisis:
-                        debut_str = debut.strftime("%H:%M")
-                        fin_str = fin.strftime("%H:%M")
-                        
                         donnees.append({
                             "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
-                            "debut": debut_str, "fin": fin_str,
-                            "pref_A": pref_A, "pref_B": pref_B, "pref_C": pref_C,
+                            "debut": debut.strftime("%H:%M"), "fin": fin.strftime("%H:%M"),
+                            "limite_max": limite_max,  # Sauvegarde de la limite choisie
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
                             "t_min_adj": creneau_min_adj
                         })
                     sauvegarder_donnees(donnees)
-                    st.success("Créneaux et affinités ajoutés !")
+                    st.success("Créneaux ajoutés avec succès !")
                     st.rerun()
 
         st.markdown("---")
@@ -246,7 +237,7 @@ if not est_admin:
             for d in mes_dispos:
                 col_info, col_btn = st.columns([4, 1])
                 with col_info:
-                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(A:{d['pref_A']} B:{d['pref_B']} C:{d['pref_C']})*")
+                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(Limite: {d.get('limite_max', 'Non définie')})*")
                 with col_btn:
                     if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
@@ -263,7 +254,7 @@ if est_admin:
         st.session_state.assignations_forcees = []
         st.rerun()
 
-    tab_liste, tab_force, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "🚀 Génération & Planning"])
+    tab_liste, tab_force, tab_param, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "⚙️ Paramètres", "🚀 Génération & Planning"])
 
     with tab_liste:
         if donnees:
@@ -296,8 +287,29 @@ if est_admin:
                 st.session_state.assignations_forcees = []
                 st.rerun()
 
+    with tab_param:
+        st.subheader("Matrice des Affinités")
+        st.write("Définissez vers quels plannings orienter l'algorithme en fonction de la 'Limite Max' choisie par le joueur. *(1 = On évite, 5 = On priorise)*")
+        
+        affinites_admin = charger_matrice_affinites()
+        
+        with st.form("form_affinites"):
+            for limite in ["250", "100", "50"]:
+                st.markdown(f"**Pour les joueurs avec Limite Max = {limite} :**")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a: val_a = st.slider(f"Planning A ({limite})", 1, 5, affinites_admin[limite]["Planning A"])
+                with col_b: val_b = st.slider(f"Planning B ({limite})", 1, 5, affinites_admin[limite]["Planning B"])
+                with col_c: val_c = st.slider(f"Planning C ({limite})", 1, 5, affinites_admin[limite]["Planning C"])
+                
+                affinites_admin[limite] = {"Planning A": val_a, "Planning B": val_b, "Planning C": val_c}
+                st.write("") # Espacement
+                
+            if st.form_submit_button("Enregistrer la matrice", type="primary"):
+                sauvegarder_matrice_affinites(affinites_admin)
+                st.success("Matrice enregistrée et appliquée pour les prochaines générations !")
+
     with tab_gen:
-        st.subheader("Lancer l'Optimisation Mathématique (PuLP)")
+        st.subheader("Lancer l'Optimisation Mathématique")
         c1, c2 = st.columns(2)
         with c1: resolution = st.number_input("Résolution (min)", value=30, step=5)
         with c2: joueurs_simultanes = st.number_input("Joueurs max par planning", value=1, min_value=1)
@@ -308,16 +320,15 @@ if est_admin:
             else:
                 planning_complet = []
                 temps_totaux = {j: 0 for j in noms_dispos}
-                
                 jours_presents = list(set([d["jour"] for d in donnees]))
+                matrice = charger_matrice_affinites() # On charge la matrice définie par l'admin
                 
-                with st.spinner('Le solveur mathématique calcule l\'optimum absolu...'):
-                    # L'optimisation se fait jour par jour
+                with st.spinner('Le solveur calcule la répartition optimale...'):
                     for jour in jours_presents:
                         donnees_jour = [d for d in donnees if d["jour"] == jour]
                         planning_j, temps_j = optimiser_planning_pulp(
                             donnees_jour, resolution, joueurs_simultanes, 
-                            st.session_state.assignations_forcees, jour
+                            st.session_state.assignations_forcees, jour, matrice
                         )
                         planning_complet.extend(planning_j)
                         for j, t in temps_j.items():
