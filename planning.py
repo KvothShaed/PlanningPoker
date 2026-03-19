@@ -254,7 +254,7 @@ if not est_admin:
                         donnees.append({
                             "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
-                            "debut": debut.strftime("%H:%M"), "fin": fin.strftime("%H:%M"),
+                            "debut": debut_str, "fin": fin_str, # ICI : Plus de .strftime()
                             "limite_max": limite_max,
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
