@@ -182,4 +182,170 @@ if not est_admin:
         
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.subheader("Ajouter une disponibilité")
-            jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "
+            jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
+            
+            col1, col2 = st.columns(2)
+            with col1: debut = st.time_input("Arrivée", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
+            with col2: fin = st.time_input("Départ", value=pd.to_datetime("22:00").time(), step=timedelta(minutes=30))
+            
+            st.markdown("#### 🎯 Paramètre Joueur")
+            limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
+                
+            st.markdown("#### ⚙️ Contraintes de rythme")
+            c1, c2 = st.columns(2)
+            with c1:
+                temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
+                creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
+            with c2: 
+                break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
+                
+            c3, c4 = st.columns(2)
+            with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
+            with c4: creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
+            
+            if st.form_submit_button("Enregistrer pour ces jours"):
+                if not jours_choisis:
+                    st.error("Veuillez sélectionner au moins un jour.")
+                else:
+                    donnees = charger_donnees()
+                    for j in jours_choisis:
+                        donnees.append({
+                            "id": str(uuid.uuid4()),
+                            "nom": nom_joueur.strip(), "jour": j,
+                            "debut": debut.strftime("%H:%M"), "fin": fin.strftime("%H:%M"),
+                            "limite_max": limite_max,
+                            "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
+                            "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
+                            "t_min_adj": creneau_min_adj
+                        })
+                    sauvegarder_donnees(donnees)
+                    st.success("Créneaux ajoutés avec succès !")
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("Vos créneaux enregistrés")
+        donnees = charger_donnees()
+        mes_dispos = [d for d in donnees if d["nom"] == nom_joueur.strip()]
+        
+        if mes_dispos:
+            for d in mes_dispos:
+                col_info, col_btn = st.columns([4, 1])
+                with col_info:
+                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(Limite: {d.get('limite_max', 'Non définie')})*")
+                with col_btn:
+                    if st.button("❌", key=d["id"]):
+                        supprimer_entree(d["id"])
+                        st.rerun()
+
+# --- VUE 2 : L'ADMINISTRATEUR ---
+if est_admin:
+    st.success("Mode Administrateur activé")
+    donnees = charger_donnees()
+    noms_dispos = list(set([d["nom"] for d in donnees])) if donnees else []
+    
+    if st.button("🗑️ Effacer la base de données"):
+        sauvegarder_donnees([])
+        st.session_state.assignations_forcees = []
+        # On remet aussi la matrice à zéro pour éviter tout conflit
+        sauvegarder_matrice_affinites({
+            "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
+            "100": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
+            "50": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3}
+        })
+        st.rerun()
+
+    tab_liste, tab_force, tab_param, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "⚙️ Paramètres", "🚀 Génération & Planning"])
+
+    with tab_liste:
+        if donnees:
+            df = pd.DataFrame(donnees)
+            st.dataframe(df.drop(columns=["id"]), use_container_width=True)
+            
+            options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees}
+            creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
+            if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
+                for sel in creneaux_a_supprimer: supprimer_entree(options_suppression[sel])
+                st.rerun()
+
+    with tab_force:
+        st.subheader("Forcer des assignations manuelles")
+        col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns([2, 2, 2, 2, 1])
+        with col_f1: f_jour = st.selectbox("Jour", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
+        with col_f2: f_heure = st.time_input("Heure", value=pd.to_datetime("18:00").time(), step=timedelta(minutes=30))
+        with col_f3: f_joueur = st.selectbox("Joueur", noms_dispos if noms_dispos else ["Aucun"])
+        with col_f4: f_planning = st.selectbox("Planning", PLANNINGS_DISPOS)
+        with col_f5:
+            st.write(""); st.write("")
+            if st.button("➕ Ajouter") and f_joueur != "Aucun":
+                st.session_state.assignations_forcees.append({"jour": f_jour, "heure": f_heure.strftime("%H:%M"), "nom": f_joueur, "planning": f_planning})
+                st.success("Ajouté")
+        
+        if st.session_state.assignations_forcees:
+            for r in st.session_state.assignations_forcees:
+                st.caption(f"- {r['nom']} le {r['jour']} à {r['heure']} sur {r['planning']}")
+            if st.button("Effacer les règles"):
+                st.session_state.assignations_forcees = []
+                st.rerun()
+
+    with tab_param:
+        st.subheader("Matrice des Affinités")
+        st.write("Définissez vers quels plannings orienter l'algorithme en fonction de la 'Limite Max' choisie par le joueur. *(1 = On évite, 5 = On priorise)*")
+        
+        affinites_admin = charger_matrice_affinites()
+        
+        with st.form("form_affinites"):
+            for limite in ["250", "100", "50"]:
+                st.markdown(f"**Pour les joueurs avec Limite Max = {limite} :**")
+                col_a, col_b, col_c = st.columns(3)
+                # Utilisation de .get() pour éviter un plantage si l'ancien fichier config_affinites.json est encore là
+                with col_a: val_250 = st.slider(f"Planning 250 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 250", 3))
+                with col_b: val_100 = st.slider(f"Planning 100 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 100", 3))
+                with col_c: val_50 = st.slider(f"Planning 50 ({limite})", 1, 5, affinites_admin.get(limite, {}).get("Planning 50", 3))
+                
+                affinites_admin[limite] = {"Planning 250": val_250, "Planning 100": val_100, "Planning 50": val_50}
+                st.write("") 
+                
+            if st.form_submit_button("Enregistrer la matrice", type="primary"):
+                sauvegarder_matrice_affinites(affinites_admin)
+                st.success("Matrice enregistrée et appliquée pour les prochaines générations !")
+
+    with tab_gen:
+        st.subheader("Lancer l'Optimisation Mathématique")
+        c1, c2 = st.columns(2)
+        with c1: resolution = st.number_input("Résolution (min)", value=30, step=5)
+        with c2: joueurs_simultanes = st.number_input("Joueurs max par planning", value=1, min_value=1)
+
+        if st.button("🚀 Résoudre le planning", type="primary"):
+            if not donnees:
+                st.error("Aucune donnée.")
+            else:
+                planning_complet = []
+                temps_totaux = {j: 0 for j in noms_dispos}
+                jours_presents = list(set([d["jour"] for d in donnees]))
+                matrice = charger_matrice_affinites()
+                
+                with st.spinner('Le solveur calcule la répartition optimale...'):
+                    for jour in jours_presents:
+                        donnees_jour = [d for d in donnees if d["jour"] == jour]
+                        planning_j, temps_j = optimiser_planning_pulp(
+                            donnees_jour, resolution, joueurs_simultanes, 
+                            st.session_state.assignations_forcees, jour, matrice
+                        )
+                        planning_complet.extend(planning_j)
+                        for j, t in temps_j.items():
+                            temps_totaux[j] += t
+                
+                st.success("Planning optimal trouvé !")
+                
+                st.markdown("### 📅 Emploi du temps")
+                st.markdown(generer_grille_html(planning_complet, noms_dispos), unsafe_allow_html=True)
+                
+                st.markdown("### 📊 Temps de jeu total")
+                stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in temps_totaux.items() if t > 0]
+                if stats_data:
+                    df_stats = pd.DataFrame(stats_data)
+                    barres = alt.Chart(df_stats).mark_bar().encode(
+                        x=alt.X('Joueur:O', sort='-y'),
+                        y='Temps (Heures):Q'
+                    )
+                    st.altair_chart(barres, use_container_width=True)
