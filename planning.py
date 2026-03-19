@@ -171,7 +171,7 @@ with st.sidebar:
 # --- VUE 1 : LES JOUEURS ---
 if not est_admin:
     st.header("👤 Espace Joueur")
-    nom_joueur = st.text_input("Identifiez-vous (Votre Prénom / Nom) :")
+    nom_joueur = st.text_input("Identifiez-vous (Votre Pseudo) :")
     
     if nom_joueur.strip():
         st.markdown(f"### Bienvenue {nom_joueur} !")
