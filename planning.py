@@ -211,7 +211,7 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
         r, g, b = colorsys.hls_to_rgb(hue, 0.85, 0.8)
         
         # On convertit le résultat en code couleur HTML (#RRGGBB)
-        map_couleurs[joueur] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}")}
+        map_couleurs[joueur] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
     
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
     jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
