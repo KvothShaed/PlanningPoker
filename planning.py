@@ -50,36 +50,21 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     prob = pulp.LpProblem("Optimisation_Hebdomadaire", pulp.LpMaximize)
     
     jours_semaine = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    creneaux_par_jour = {}
     creneaux_globaux = []
     
-    # 1. Construction du calendrier global de la semaine
+    # 1. Création d'une Timeline CONTINUE pour toute la semaine (Franchit Minuit sans problème)
     for jour in jours_semaine:
-        donnees_jour = [d for d in donnees_totales if d["jour"] == jour]
-        if not donnees_jour:
-            continue
-            
-        h_min = min([datetime.strptime(d["debut"], "%H:%M") for d in donnees_jour])
-        h_max = max([datetime.strptime(d["fin"], "%H:%M") for d in donnees_jour if d["fin"] != "23:59"] + [datetime.strptime("23:59", "%H:%M")])
-        
-        actuel = h_min
-        creneaux_jour = []
-        while actuel < h_max:
-            h_str = actuel.strftime('%H:%M')
-            c_global = f"{jour}_{h_str}" # Ex: "Lundi_18:00"
-            creneaux_jour.append(c_global)
-            creneaux_globaux.append(c_global)
+        actuel = datetime.strptime("00:00", "%H:%M")
+        fin = datetime.strptime("23:59", "%H:%M")
+        while actuel < fin:
+            creneaux_globaux.append(f"{jour}_{actuel.strftime('%H:%M')}")
             actuel += timedelta(minutes=resolution)
-            
-        creneaux_par_jour[jour] = creneaux_jour
 
     joueurs = list(set([d["nom"] for d in donnees_totales]))
     
-    # Variables de décision
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
 
-    # Variables d'équité calculées sur TOUTE LA SEMAINE
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
     Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
@@ -90,7 +75,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
-    # Calcul des temps totaux hebdomadaires
+    # Calcul des temps totaux
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
@@ -103,17 +88,15 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     objectif = []
     
-    # Priorité 1 : Remplir la grille sur toute la semaine (+1000)
+    # Priorités Multi-Objectifs
     objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
-    # Priorité 2 : Lisser les temps de jeu HEBDOMADAIRES (-100 par écart)
     objectif.append(-100 * (Max_Temps - Min_Temps))
 
-    # Priorité 3 : Appliquer les affinités en respectant les dispo
+    # Affinités & Indisponibilités
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             
-            # Recherche si le joueur a une disponibilité pour CE jour et CETTE heure précise
             d_jour = next((d for d in donnees_totales if d["nom"] == j and d["jour"] == jour and d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
             
             if d_jour:
@@ -132,38 +115,41 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                 
     prob += pulp.lpSum(objectif)
 
-    # Contraintes de Capacité
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
 
-    # Contraintes de rythme (Appliquées JOUR PAR JOUR pour ne pas lier le Lundi soir au Mardi matin)
+    # Contraintes de rythme appliquées sur TOUTE la semaine en continu
     for j in joueurs:
-        for jour, creneaux_jour in creneaux_par_jour.items():
-            d_jour = next((d for d in donnees_totales if d["nom"] == j and d["jour"] == jour), None)
-            if not d_jour:
-                continue
-                
-            max_slots = int(d_jour["t_max_affile"] / resolution)
-            min_slots = int(d_jour["t_min_base"] / resolution)
-            break_slots = int(d_jour.get("break_min_heavy", 30) / resolution) 
+        # On récupère les règles du joueur (la 1ère entrée suffit car c'est constant pour lui)
+        d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
+        if not d_joueur: continue
             
-            if max_slots > 0 and break_slots > 0 and len(creneaux_jour) > (max_slots + break_slots):
-                fenetre = max_slots + break_slots
-                for i in range(len(creneaux_jour) - fenetre + 1):
-                    prob += pulp.lpSum(Y[j, creneaux_jour[i+k]] for k in range(fenetre)) <= max_slots, f"Break_{j}_{jour}_{i}"
-                    
-            elif max_slots > 0 and len(creneaux_jour) > max_slots:
-                for i in range(len(creneaux_jour) - max_slots):
-                    prob += pulp.lpSum(Y[j, creneaux_jour[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{jour}_{i}"
-                    
-            if min_slots > 1:
-                for i in range(1, len(creneaux_jour) - min_slots + 1):
-                    start_var = Y[j, creneaux_jour[i]] - Y[j, creneaux_jour[i-1]]
-                    for k in range(1, min_slots):
-                        prob += start_var <= Y[j, creneaux_jour[i+k]], f"Min_{j}_{jour}_{i}_{k}"
+        max_slots = int(d_joueur["t_max_affile"] / resolution)
+        min_slots = int(d_joueur["t_min_base"] / resolution)
+        break_slots = int(d_joueur.get("break_min_heavy", 30) / resolution) 
+        
+        # 1. Pause obligatoire après session max (Franchit minuit sans souci)
+        if max_slots > 0 and break_slots > 0 and len(creneaux_globaux) > (max_slots + break_slots):
+            fenetre = max_slots + break_slots
+            for i in range(len(creneaux_globaux) - fenetre + 1):
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots, f"Break_{j}_{i}"
+                
+        elif max_slots > 0 and len(creneaux_globaux) > max_slots:
+            for i in range(len(creneaux_globaux) - max_slots):
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
+                
+        # 2. Minimum de temps par session
+        if min_slots > 1:
+            # Gestion du tout 1er créneau de la semaine
+            for k in range(1, min_slots):
+                prob += Y[j, creneaux_globaux[0]] <= Y[j, creneaux_globaux[k]], f"Min_{j}_0_{k}"
+            # Gestion du reste de la semaine
+            for i in range(1, len(creneaux_globaux) - min_slots + 1):
+                start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
+                for k in range(1, min_slots):
+                    prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
-    # Assignations forcées
     for force in assignations_forcees:
         c_cible = f"{force['jour']}_{force['heure']}"
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
@@ -410,7 +396,6 @@ if est_admin:
                 matrice = charger_matrice_affinites()
                 
                 with st.spinner('Le solveur calcule la répartition optimale sur toute la semaine...'):
-                    # L'appel à la fonction est maintenant unique, la boucle `for jour` a disparu
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
                         donnees, resolution, joueurs_simultanes, 
                         st.session_state.assignations_forcees, matrice
