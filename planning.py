@@ -64,7 +64,6 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux), cat='Binary')
 
-    # NOUVELLES VARIABLES POUR L'ÉQUITÉ
     Temps_Total = pulp.LpVariable.dicts("TempsTotal", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTemps", lowBound=0, cat='Integer')
     Min_Temps = pulp.LpVariable("MinTemps", lowBound=0, cat='Integer')
@@ -75,7 +74,6 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
         "50":  ["Planning 50"]
     }
 
-    # Calcul des temps totaux et définition du Max/Min
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux), f"Calc_Temps_{j}"
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
@@ -86,16 +84,11 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
-    # FONCTION OBJECTIF MULTI-CRITÈRES
     objectif = []
     
-    # 1. Remplir le plus possible (+1000 par slot joué)
     objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux))
-    
-    # 2. Équité : Pénaliser l'écart entre le plus gros et le plus petit temps de jeu (-100 par slot d'écart)
     objectif.append(-100 * (Max_Temps - Min_Temps))
 
-    # 3. Affinités (+1 à 5 par slot sur le bon planning)
     for j, d in joueurs_data.items():
         limite_joueur = str(d.get("limite_max", 250))
         prefs_admin = matrice_affinites.get(limite_joueur, {"Planning 250": 1, "Planning 100": 1, "Planning 50": 1})
@@ -168,8 +161,8 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
     horaires_str = sorted(list(set([p["Horaire"] for p in planning])))
     
+    # Les mêmes couleurs seront utilisées pour les en-têtes ET l'arrière-plan des colonnes
     couleurs_colonnes = {"Planning 250": "#ffebee", "Planning 100": "#e8f5e9", "Planning 50": "#e3f2fd"}
-    couleurs_cellules = {"Planning 250": "#fffafb", "Planning 100": "#fafffa", "Planning 50": "#fbfdff"}
     
     html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif; color: #333;'>"
     html += "<tr><th rowspan='2' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
@@ -192,7 +185,10 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
         for j in jours:
             for p in ["Planning 250", "Planning 100", "Planning 50"]:
                 slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
-                bg_color = couleurs_cellules[p]
+                
+                # ICI : On applique la couleur de la colonne à la cellule
+                bg_color = couleurs_colonnes[p]
+                
                 html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {bg_color};'>"
                 if slot and slot["Joueurs_Liste"]:
                     for joueur in slot["Joueurs_Liste"]:
@@ -206,7 +202,7 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
 # ==========================================
 # INTERFACE UTILISATEUR
 # ==========================================
-st.title("Générateur de Planning Multi-Sites Optimisé 🗓️")
+st.title("Générateur de Planning Unibet Multi-Limites 🗓️")
 
 with st.sidebar:
     st.header("👑 Accès Admin")
@@ -216,12 +212,19 @@ with st.sidebar:
 # --- VUE 1 : LES JOUEURS ---
 if not est_admin:
     st.header("👤 Espace Joueur")
-    nom_joueur = st.text_input("Identifiez-vous (Votre Prénom / Nom) :")
+    nom_joueur = st.text_input("Identifiez-vous (Pseudo) :")
     
     if nom_joueur.strip():
         st.markdown(f"### Bienvenue {nom_joueur} !")
         
         with st.form("formulaire_dispo", clear_on_submit=False):
+            
+            # Paramètre Joueur monté en haut du formulaire
+            st.markdown("#### 🎯 Paramètre Joueur")
+            limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
+            
+            st.markdown("---")
+            
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
@@ -232,9 +235,6 @@ if not est_admin:
                 debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
             with col2: 
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
-            
-            st.markdown("#### 🎯 Paramètre Joueur")
-            limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
                 
             st.markdown("#### ⚙️ Contraintes de rythme")
             c1, c2 = st.columns(2)
