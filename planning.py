@@ -280,7 +280,7 @@ def mettre_a_jour_google_sheet(planning):
     client = gspread.authorize(creds)
 
     # 2. Ouverture du fichier via son ID (trouvable dans l'URL de ton Google Sheet)
-    sheet_id = "REMPLACE_PAR_L_ID_DE_TON_FICHIER" 
+    sheet_id = "1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic" 
     sheet = client.open_by_key(sheet_id).sheet1 # On prend le premier onglet
 
     # 3. Préparation des données
@@ -514,6 +514,6 @@ if est_admin:
                         # On récupère les données enregistrées dans le session_state
                         mettre_a_jour_google_sheet(st.session_state.planning_complet)
                         st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
-                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/TON_ID_DE_FICHIER_ICI)")
+                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit?gid=0#gid=0)")
                     except Exception as e:
                         st.error(f"Erreur lors de la mise à jour : {e}")
