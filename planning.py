@@ -4,6 +4,7 @@ import uuid
 import pulp
 import altair as alt
 from datetime import datetime, timedelta
+import colorsys
 
 # --- NOUVEAUX IMPORTS POUR FIREBASE ---
 import firebase_admin
