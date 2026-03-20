@@ -5,6 +5,8 @@ import pulp
 import altair as alt
 from datetime import datetime, timedelta
 import colorsys
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- NOUVEAUX IMPORTS POUR FIREBASE ---
 import firebase_admin
