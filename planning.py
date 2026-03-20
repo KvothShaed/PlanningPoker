@@ -244,9 +244,14 @@ if not est_admin:
             with c2: 
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
-            c3, c4 = st.columns(2)
-            with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
-            with c4: creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
+            # --- Variables masquées pour alléger l'interface ---
+            # c3, c4 = st.columns(2)
+            # with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
+            # with c4: creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
+            
+            # On assigne les valeurs par défaut en invisible pour ne pas casser la sauvegarde
+            break_max_cond = 30
+            creneau_min_adj = 30
             
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
