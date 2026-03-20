@@ -196,8 +196,22 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 # --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques, resolution):
     if not planning: return "<p>Aucun planning généré.</p>"
-    couleurs = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF", "#FFFFFC"]
-    map_couleurs = {j: couleurs[i % len(couleurs)] for i, j in enumerate(joueurs_uniques)}
+    
+    # --- NOUVELLE GESTION DES COULEURS DYNAMIQUES ---
+    n_joueurs = len(joueurs_uniques)
+    map_couleurs = {}
+    
+    for i, joueur in enumerate(joueurs_uniques):
+        # On divise le cercle des couleurs (de 0 à 1) de manière parfaitement égale
+        hue = i / n_joueurs if n_joueurs > 0 else 0
+        
+        # hls_to_rgb prend (Teinte, Luminosité, Saturation)
+        # Luminosité à 0.85 = clair (pour bien lire le texte noir)
+        # Saturation à 0.8 = couleurs bien vives et distinctes
+        r, g, b = colorsys.hls_to_rgb(hue, 0.85, 0.8)
+        
+        # On convertit le résultat en code couleur HTML (#RRGGBB)
+        map_couleurs[joueur] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}")}
     
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
     jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
