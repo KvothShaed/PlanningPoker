@@ -497,3 +497,15 @@ if est_admin:
                             y='Temps (Heures):Q'
                         )
                         st.altair_chart(barres, use_container_width=True)
+
+st.markdown("---")
+st.markdown("### ☁️ Publication en ligne")
+                    
+if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
+    try:
+        mettre_a_jour_google_sheet(planning_complet)
+        st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
+        # Tu peux même afficher le lien cliquable pour l'admin
+        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/TON_ID_DE_FICHIER_ICI)")
+    except Exception as e:
+        st.error(f"Erreur lors de la mise à jour : {e}")
