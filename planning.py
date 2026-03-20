@@ -276,6 +276,7 @@ with st.sidebar:
     est_admin = (mot_de_passe == "Romarino7") 
 
 # --- VUE 1 : LES JOUEURS ---
+# --- VUE 1 : LES JOUEURS ---
 if not est_admin:
     st.header("👤 Espace Joueur")
     nom_joueur = st.text_input("Identifiez-vous (Pseudo) :")
@@ -284,10 +285,26 @@ if not est_admin:
         st.markdown(f"### Bienvenue {nom_joueur} !")
         
         with st.form("formulaire_dispo", clear_on_submit=False):
-            st.markdown("#### 🎯 Paramètre Joueur")
+            st.markdown("#### 🎯 Paramètres du Joueur")
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
+            
+            # --- ON MONTE LES CONTRAINTES DE RYTHME ICI ---
+            st.markdown("#### ⚙️ Contraintes de rythme")
+            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=100, step=1)
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
+                creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
+            with c2: 
+                break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
+                
+            break_max_cond = 30
+            creneau_min_adj = 30
+            
             st.markdown("---")
             
+            # --- ON DESCEND LA SÉLECTION DES JOURS/HEURES ICI ---
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
@@ -299,24 +316,13 @@ if not est_admin:
             with col2: 
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
-            st.markdown("#### ⚙️ Contraintes de rythme")
-            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=100, step=1)
-            c1, c2 = st.columns(2)
-            with c1:
-                temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
-                creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
-            with c2: 
-                break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
-                
-            break_max_cond = 30
-            creneau_min_adj = 30
             
+            # --- SOUMISSION DU FORMULAIRE ---
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
                     st.error("Veuillez sélectionner au moins un jour.")
                 else:
                     for j in jours_choisis:
-                        # On crée le dictionnaire pour un jour
                         nouvelle_dispo = {
                             "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
@@ -327,7 +333,6 @@ if not est_admin:
                             "t_min_adj": creneau_min_adj,
                             "heures_max_hebdo": heures_max_hebdo
                         }
-                        # On l'envoie directement à Firebase
                         ajouter_dispo(nouvelle_dispo)
                         
                     st.success("Créneaux ajoutés avec succès !")
