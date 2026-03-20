@@ -104,6 +104,19 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
+        # --- NOUVELLE CONTRAINTE : MAX HEURES HEBDO ---
+        # On cherche les infos de ce joueur (on prend n'importe quelle dispo pour avoir son paramétrage)
+        d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
+        if d_joueur:
+            # On récupère la valeur saisie, ou 168h (une semaine complète) par défaut si ce sont d'anciennes données
+            max_h_hebdo = d_joueur.get("heures_max_hebdo", 168)
+            
+            # Conversion : Heures -> Minutes -> Nombre de créneaux (slots)
+            max_slots_hebdo = int((max_h_hebdo * 60) / resolution)
+            
+            # Application stricte de la contrainte au solveur
+            prob += Temps_Total[j] <= max_slots_hebdo, f"Limite_Heures_Hebdo_{j}"
+
     for c in creneaux_globaux:
         for j in joueurs:
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
@@ -287,6 +300,7 @@ if not est_admin:
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
             st.markdown("#### ⚙️ Contraintes de rythme")
+            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=30, step=1)
             c1, c2 = st.columns(2)
             with c1:
                 temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
@@ -310,7 +324,8 @@ if not est_admin:
                             "limite_max": limite_max,
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
-                            "t_min_adj": creneau_min_adj
+                            "t_min_adj": creneau_min_adj,
+                            "heures_max_hebdo": heures_max_hebdo
                         }
                         # On l'envoie directement à Firebase
                         ajouter_dispo(nouvelle_dispo)
