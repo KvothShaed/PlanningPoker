@@ -186,12 +186,14 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    # --- AJOUT DE LA LIMITE DE TEMPS (60 SECONDES) ---
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
     
-    if pulp.LpStatus[prob.status] == 'Optimal':
+    # Le solveur peut retourner 'Optimal' ou 'Not Solved' si arrêté par le temps mais ayant trouvé une solution valide
+    if pulp.LpStatus[prob.status] == 'Optimal' or pulp.LpStatus[prob.status] == 'Not Solved':
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             for p in PLANNINGS_DISPOS:
@@ -273,7 +275,7 @@ def mettre_a_jour_google_sheet(planning):
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
-    # On suppose que tu as mis tes identifiants Google Cloud dans st.secrets["google_sheets"]
+    # On charge les identifiants depuis Streamlit
     creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
     client = gspread.authorize(creds)
 
@@ -281,16 +283,17 @@ def mettre_a_jour_google_sheet(planning):
     sheet_id = "REMPLACE_PAR_L_ID_DE_TON_FICHIER" 
     sheet = client.open_by_key(sheet_id).sheet1 # On prend le premier onglet
 
-    # 3. Préparation des données (comme pour le CSV)
+    # 3. Préparation des données
     df_export = pd.DataFrame(planning)
     if not df_export.empty:
-        # On transforme la liste ["Joueur1", "Joueur2"] en texte "Joueur1, Joueur2"
-        df_export["Joueurs_Liste"] = df_export["Joueurs_Liste"].apply(lambda x: ", ".join(x))
+        # Transformation sécurisée pour convertir les listes en texte lisible
+        df_export["Joueurs_Liste"] = df_export["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
 
     # 4. Envoi des données vers Google Sheets
     sheet.clear() # On vide l'ancien planning
     # On envoie les en-têtes puis les données
     sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
+
 
 # ==========================================
 # INTERFACE UTILISATEUR
@@ -303,7 +306,6 @@ with st.sidebar:
     est_admin = (mot_de_passe == "Romarino7") 
 
 # --- VUE 1 : LES JOUEURS ---
-# --- VUE 1 : LES JOUEURS ---
 if not est_admin:
     st.header("👤 Espace Joueur")
     nom_joueur = st.text_input("Identifiez-vous (Pseudo) :")
@@ -315,7 +317,7 @@ if not est_admin:
             st.markdown("#### 🎯 Paramètres du Joueur")
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
             
-            # --- ON MONTE LES CONTRAINTES DE RYTHME ICI ---
+            # --- CONTRAINTES DE RYTHME ---
             st.markdown("#### ⚙️ Contraintes de rythme")
             heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=100, step=1)
             
@@ -331,7 +333,7 @@ if not est_admin:
             
             st.markdown("---")
             
-            # --- ON DESCEND LA SÉLECTION DES JOURS/HEURES ICI ---
+            # --- SÉLECTION DES JOURS/HEURES ---
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
@@ -343,7 +345,6 @@ if not est_admin:
             with col2: 
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
-            
             # --- SOUMISSION DU FORMULAIRE ---
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
@@ -479,6 +480,9 @@ if est_admin:
                         donnees, resolution, joueurs_simultanes, 
                         st.session_state.assignations_forcees, matrice
                     )
+                    
+                    # --- NOUVEAUTÉ : ON SAUVEGARDE EN MÉMOIRE POUR LE BOUTON GOOGLE SHEET ---
+                    st.session_state.planning_complet = planning_complet
                 
                 if not planning_complet:
                     st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes et les disponibilités.")
@@ -498,14 +502,18 @@ if est_admin:
                         )
                         st.altair_chart(barres, use_container_width=True)
 
-st.markdown("---")
-st.markdown("### ☁️ Publication en ligne")
-                    
-if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
-    try:
-        mettre_a_jour_google_sheet(planning_complet)
-        st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
-        # Tu peux même afficher le lien cliquable pour l'admin
-        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/TON_ID_DE_FICHIER_ICI)")
-    except Exception as e:
-        st.error(f"Erreur lors de la mise à jour : {e}")
+        # --- NOUVEAU BLOC : EXPORT GOOGLE SHEETS (DANS L'ONGLET TAB_GEN) ---
+        # On vérifie qu'un planning a bien été sauvegardé dans la mémoire au moment du clic précédent
+        if 'planning_complet' in st.session_state and st.session_state.planning_complet:
+            st.markdown("---")
+            st.markdown("### ☁️ Publication en ligne")
+            
+            if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
+                with st.spinner("Envoi des données vers Google Sheets..."):
+                    try:
+                        # On récupère les données enregistrées dans le session_state
+                        mettre_a_jour_google_sheet(st.session_state.planning_complet)
+                        st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
+                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/TON_ID_DE_FICHIER_ICI)")
+                    except Exception as e:
+                        st.error(f"Erreur lors de la mise à jour : {e}")
