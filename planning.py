@@ -300,7 +300,7 @@ if not est_admin:
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
             st.markdown("#### ⚙️ Contraintes de rythme")
-            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=30, step=1)
+            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=100, step=1)
             c1, c2 = st.columns(2)
             with c1:
                 temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
