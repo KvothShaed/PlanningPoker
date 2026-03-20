@@ -267,6 +267,31 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     html += "</table>"
     return html
 
+def mettre_a_jour_google_sheet(planning):
+    # 1. Authentification (similaire à Firebase)
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    # On suppose que tu as mis tes identifiants Google Cloud dans st.secrets["google_sheets"]
+    creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
+    client = gspread.authorize(creds)
+
+    # 2. Ouverture du fichier via son ID (trouvable dans l'URL de ton Google Sheet)
+    sheet_id = "REMPLACE_PAR_L_ID_DE_TON_FICHIER" 
+    sheet = client.open_by_key(sheet_id).sheet1 # On prend le premier onglet
+
+    # 3. Préparation des données (comme pour le CSV)
+    df_export = pd.DataFrame(planning)
+    if not df_export.empty:
+        # On transforme la liste ["Joueur1", "Joueur2"] en texte "Joueur1, Joueur2"
+        df_export["Joueurs_Liste"] = df_export["Joueurs_Liste"].apply(lambda x: ", ".join(x))
+
+    # 4. Envoi des données vers Google Sheets
+    sheet.clear() # On vide l'ancien planning
+    # On envoie les en-têtes puis les données
+    sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
+
 # ==========================================
 # INTERFACE UTILISATEUR
 # ==========================================
