@@ -114,11 +114,21 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     for j, d in joueurs_data.items():
         max_slots = int(d["t_max_affile"] / resolution)
         min_slots = int(d["t_min_base"] / resolution)
+        break_slots = int(d.get("break_min_heavy", 30) / resolution) # Récupération dynamique par joueur
         
-        if max_slots > 0 and len(creneaux) > max_slots:
+        # 1. Ruse mathématique : Fenêtre = Max d'affilée + Temps de pause
+        if max_slots > 0 and break_slots > 0 and len(creneaux) > (max_slots + break_slots):
+            fenetre = max_slots + break_slots
+            for i in range(len(creneaux) - fenetre + 1):
+                # Dans cette fenêtre complète, il ne peut jouer que l'équivalent de son max_slots
+                prob += pulp.lpSum(Y[j, creneaux[i+k]] for k in range(fenetre)) <= max_slots, f"Break_Lourd_{j}_{i}"
+                
+        elif max_slots > 0 and len(creneaux) > max_slots:
+            # Sécurité si la pause n'est pas bien définie ou la journée trop courte
             for i in range(len(creneaux) - max_slots):
                 prob += pulp.lpSum(Y[j, creneaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_Affile_{j}_{i}"
                 
+        # 2. Temps minimum par session
         if min_slots > 1:
             for i in range(1, len(creneaux) - min_slots + 1):
                 start_var = Y[j, creneaux[i]] - Y[j, creneaux[i-1]]
@@ -161,7 +171,6 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
     horaires_str = sorted(list(set([p["Horaire"] for p in planning])))
     
-    # Les mêmes couleurs seront utilisées pour les en-têtes ET l'arrière-plan des colonnes
     couleurs_colonnes = {"Planning 250": "#ffebee", "Planning 100": "#e8f5e9", "Planning 50": "#e3f2fd"}
     
     html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif; color: #333;'>"
@@ -185,8 +194,6 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
         for j in jours:
             for p in ["Planning 250", "Planning 100", "Planning 50"]:
                 slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
-                
-                # ICI : On applique la couleur de la colonne à la cellule
                 bg_color = couleurs_colonnes[p]
                 
                 html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {bg_color};'>"
@@ -218,11 +225,8 @@ if not est_admin:
         st.markdown(f"### Bienvenue {nom_joueur} !")
         
         with st.form("formulaire_dispo", clear_on_submit=False):
-            
-            # Paramètre Joueur monté en haut du formulaire
             st.markdown("#### 🎯 Paramètre Joueur")
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
-            
             st.markdown("---")
             
             st.subheader("Ajouter une disponibilité")
@@ -244,12 +248,7 @@ if not est_admin:
             with c2: 
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
-            # --- Variables masquées pour alléger l'interface ---
-            # c3, c4 = st.columns(2)
-            # with c3: break_max_cond = st.number_input("Si pause moins de (min)", value=30, step=15)
-            # with c4: creneau_min_adj = st.number_input("...jouer au moins", value=30, step=15)
-            
-            # On assigne les valeurs par défaut en invisible pour ne pas casser la sauvegarde
+            # Variables masquées pour alléger l'interface, mais nécessaires pour la rétrocompatibilité des données
             break_max_cond = 30
             creneau_min_adj = 30
             
