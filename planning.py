@@ -1,46 +1,70 @@
 import streamlit as st
 import pandas as pd
-import json
-import os
 import uuid
 import pulp
 import altair as alt
 from datetime import datetime, timedelta
 
+# --- NOUVEAUX IMPORTS POUR FIREBASE ---
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 st.set_page_config(page_title="Planning Optimisé & Multisites", layout="wide")
 
-FICHIER_DONNEES = "dispos_avancees.json"
-FICHIER_AFFINITES = "config_affinites.json"
 PLANNINGS_DISPOS = ["Planning 250", "Planning 100", "Planning 50"]
 
 if 'assignations_forcees' not in st.session_state:
     st.session_state.assignations_forcees = []
 
-# --- GESTION DES DONNÉES ---
-def charger_donnees():
-    if os.path.exists(FICHIER_DONNEES):
-        with open(FICHIER_DONNEES, "r") as f: return json.load(f)
-    return []
+# ==========================================
+# INITIALISATION DE FIREBASE
+# ==========================================
+# Vérifie si l'application Firebase est déjà initialisée pour éviter les erreurs au rechargement
+if not firebase_admin._apps:
+    # On charge les identifiants secrets depuis Streamlit (st.secrets)
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
+    firebase_admin.initialize_app(cred)
 
-def sauvegarder_donnees(data):
-    with open(FICHIER_DONNEES, "w") as f: json.dump(data, f)
+# On crée le client pour interagir avec la base de données Firestore
+db = firestore.client()
+
+# ==========================================
+# GESTION DES DONNÉES (CLOUD FIRESTORE)
+# ==========================================
+
+def charger_donnees():
+    # Récupère tous les documents dans la collection "dispos"
+    docs = db.collection('dispos').stream()
+    return [doc.to_dict() for doc in docs]
+
+def ajouter_dispo(dispo_data):
+    # Ajoute ou met à jour un document avec son ID unique
+    db.collection('dispos').document(dispo_data["id"]).set(dispo_data)
 
 def supprimer_entree(id_entree):
-    donnees = charger_donnees()
-    donnees = [d for d in donnees if d.get("id") != id_entree]
-    sauvegarder_donnees(donnees)
+    # Supprime un document spécifique
+    db.collection('dispos').document(id_entree).delete()
+
+def vider_toutes_les_dispos():
+    # Fonction pour l'admin : supprime tous les créneaux
+    docs = db.collection('dispos').stream()
+    for doc in docs:
+        doc.reference.delete()
 
 def charger_matrice_affinites():
-    if os.path.exists(FICHIER_AFFINITES):
-        with open(FICHIER_AFFINITES, "r") as f: return json.load(f)
+    doc = db.collection('config').document('affinites').get()
+    if doc.exists:
+        return doc.to_dict()
+    # Valeur par défaut si la base est vide
     return {
         "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-        "100": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-        "50": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3}
+        "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
+        "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3}
     }
 
 def sauvegarder_matrice_affinites(data):
-    with open(FICHIER_AFFINITES, "w") as f: json.dump(data, f)
+    db.collection('config').document('affinites').set(data)
+
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE HEBDOMADAIRE (PuLP) ---
 def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, assignations_forcees, matrice_affinites):
@@ -52,7 +76,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     jours_semaine = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
     creneaux_globaux = []
     
-    # 1. Création d'une Timeline CONTINUE pour toute la semaine (Franchit Minuit sans problème)
     for jour in jours_semaine:
         actuel = datetime.strptime("00:00", "%H:%M")
         fin = datetime.strptime("23:59", "%H:%M")
@@ -75,7 +98,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
-    # Calcul des temps totaux
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
@@ -88,11 +110,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     objectif = []
     
-    # Priorités Multi-Objectifs
     objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
 
-    # Affinités & Indisponibilités
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
@@ -119,9 +139,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
 
-    # Contraintes de rythme appliquées sur TOUTE la semaine en continu
     for j in joueurs:
-        # On récupère les règles du joueur (la 1ère entrée suffit car c'est constant pour lui)
         d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
         if not d_joueur: continue
             
@@ -129,7 +147,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         min_slots = int(d_joueur["t_min_base"] / resolution)
         break_slots = int(d_joueur.get("break_min_heavy", 30) / resolution) 
         
-        # 1. Pause obligatoire après session max (Franchit minuit sans souci)
         if max_slots > 0 and break_slots > 0 and len(creneaux_globaux) > (max_slots + break_slots):
             fenetre = max_slots + break_slots
             for i in range(len(creneaux_globaux) - fenetre + 1):
@@ -139,12 +156,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             for i in range(len(creneaux_globaux) - max_slots):
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
                 
-        # 2. Minimum de temps par session
         if min_slots > 1:
-            # Gestion du tout 1er créneau de la semaine
             for k in range(1, min_slots):
                 prob += Y[j, creneaux_globaux[0]] <= Y[j, creneaux_globaux[k]], f"Min_{j}_0_{k}"
-            # Gestion du reste de la semaine
             for i in range(1, len(creneaux_globaux) - min_slots + 1):
                 start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
                 for k in range(1, min_slots):
@@ -272,9 +286,9 @@ if not est_admin:
                 if not jours_choisis:
                     st.error("Veuillez sélectionner au moins un jour.")
                 else:
-                    donnees = charger_donnees()
                     for j in jours_choisis:
-                        donnees.append({
+                        # On crée le dictionnaire pour un jour
+                        nouvelle_dispo = {
                             "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
                             "debut": debut_str, "fin": fin_str,
@@ -282,8 +296,10 @@ if not est_admin:
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
                             "t_min_adj": creneau_min_adj
-                        })
-                    sauvegarder_donnees(donnees)
+                        }
+                        # On l'envoie directement à Firebase
+                        ajouter_dispo(nouvelle_dispo)
+                        
                     st.success("Créneaux ajoutés avec succès !")
                     st.rerun()
 
@@ -310,12 +326,12 @@ if est_admin:
     noms_dispos = list(set([d["nom"] for d in donnees])) if donnees else []
     
     if st.button("🗑️ Effacer la base de données"):
-        sauvegarder_donnees([])
+        vider_toutes_les_dispos()
         st.session_state.assignations_forcees = []
         sauvegarder_matrice_affinites({
             "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-            "100": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-            "50": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3}
+            "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
+            "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3}
         })
         st.rerun()
 
@@ -329,7 +345,8 @@ if est_admin:
             options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees}
             creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
             if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
-                for sel in creneaux_a_supprimer: supprimer_entree(options_suppression[sel])
+                for sel in creneaux_a_supprimer: 
+                    supprimer_entree(options_suppression[sel])
                 st.rerun()
 
     with tab_force:
