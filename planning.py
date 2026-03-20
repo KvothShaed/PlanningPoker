@@ -270,29 +270,53 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     return html
 
 def mettre_a_jour_google_sheet(planning):
-    # 1. Authentification (similaire à Firebase)
+    if not planning:
+        return
+        
+    # 1. Authentification
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
-    # On charge les identifiants depuis Streamlit
     creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
     client = gspread.authorize(creds)
 
-    # 2. Ouverture du fichier via son ID (trouvable dans l'URL de ton Google Sheet)
+    # N'OUBLIE PAS DE REMETTRE TON ID ICI
     sheet_id = "1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic" 
-    sheet = client.open_by_key(sheet_id).sheet1 # On prend le premier onglet
+    sheet = client.open_by_key(sheet_id).sheet1
 
-    # 3. Préparation des données
-    df_export = pd.DataFrame(planning)
-    if not df_export.empty:
-        # Transformation sécurisée pour convertir les listes en texte lisible
-        df_export["Joueurs_Liste"] = df_export["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+    # 2. Préparation et Pivot des données pour faire une belle grille
+    df = pd.DataFrame(planning)
+    
+    if not df.empty:
+        # Transformer la liste des joueurs en texte simple
+        df["Joueurs_Liste"] = df["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+        
+        # Créer l'en-tête de colonne (Ex: "Lundi | 250")
+        df["En_Tete"] = df["Jour"] + " | " + df["Planning"].str.replace("Planning ", "")
+        
+        # Croiser les données (Heures en lignes, Jours/Limites en colonnes)
+        df_pivot = df.pivot(index="Horaire", columns="En_Tete", values="Joueurs_Liste").fillna("")
+        
+        # Forcer un ordre logique (Lundi -> Dimanche, 250 -> 50)
+        jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+        plannings = ["250", "100", "50"]
+        
+        colonnes_triees = []
+        for j in jours:
+            for p in plannings:
+                nom_col = f"{j} | {p}"
+                if nom_col in df_pivot.columns:
+                    colonnes_triees.append(nom_col)
+                    
+        df_pivot = df_pivot[colonnes_triees]
+        
+        # Remettre "Horaire" comme première colonne normale
+        df_export = df_pivot.reset_index()
 
-    # 4. Envoi des données vers Google Sheets
-    sheet.clear() # On vide l'ancien planning
-    # On envoie les en-têtes puis les données
-    sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
+        # 3. Envoi des données propres vers Google Sheets
+        sheet.clear()
+        sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
 
 
 # ==========================================
