@@ -43,7 +43,6 @@ def sauvegarder_matrice_affinites(data):
     with open(FICHIER_AFFINITES, "w") as f: json.dump(data, f)
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
-# --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
 def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assignations_forcees, jour_cible, matrice_affinites):
     if not donnees_jour:
         return [], {}
@@ -51,7 +50,7 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     prob = pulp.LpProblem(f"Optimisation_{jour_cible}", pulp.LpMaximize)
     
     h_min = min([datetime.strptime(d["debut"], "%H:%M") for d in donnees_jour])
-    h_max = max([datetime.strptime(d["fin"], "%H:%M") for d in donnees_jour])
+    h_max = max([datetime.strptime(d["fin"], "%H:%M") for d in donnees_jour if d["fin"] != "23:59"] + [datetime.strptime("23:59", "%H:%M")])
     
     creneaux = []
     actuel = h_min
@@ -65,28 +64,46 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux), cat='Binary')
 
-    # Dictionnaire des règles d'accès stricts (Contraintes dures)
+    # NOUVELLES VARIABLES POUR L'ÉQUITÉ
+    Temps_Total = pulp.LpVariable.dicts("TempsTotal", joueurs, lowBound=0, cat='Integer')
+    Max_Temps = pulp.LpVariable("MaxTemps", lowBound=0, cat='Integer')
+    Min_Temps = pulp.LpVariable("MinTemps", lowBound=0, cat='Integer')
+
     plannings_autorises = {
         "250": ["Planning 250", "Planning 100", "Planning 50"],
         "100": ["Planning 100", "Planning 50"],
         "50":  ["Planning 50"]
     }
 
+    # Calcul des temps totaux et définition du Max/Min
+    for j in joueurs:
+        prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux), f"Calc_Temps_{j}"
+        prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
+        prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
+
     for c in creneaux:
         for j in joueurs:
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
+    # FONCTION OBJECTIF MULTI-CRITÈRES
     objectif = []
+    
+    # 1. Remplir le plus possible (+1000 par slot joué)
+    objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux))
+    
+    # 2. Équité : Pénaliser l'écart entre le plus gros et le plus petit temps de jeu (-100 par slot d'écart)
+    objectif.append(-100 * (Max_Temps - Min_Temps))
+
+    # 3. Affinités (+1 à 5 par slot sur le bon planning)
     for j, d in joueurs_data.items():
         limite_joueur = str(d.get("limite_max", 250))
         prefs_admin = matrice_affinites.get(limite_joueur, {"Planning 250": 1, "Planning 100": 1, "Planning 50": 1})
-        autorises = plannings_autorises.get(limite_joueur, PLANNINGS_DISPOS) # Sécurité
+        autorises = plannings_autorises.get(limite_joueur, PLANNINGS_DISPOS)
         
         for c in creneaux:
-            if d["debut"] <= c < d["fin"]:
+            if d["debut"] <= c < (d["fin"] if d["fin"] != "23:59" else "24:00"):
                 for p in PLANNINGS_DISPOS:
-                    # NOUVEAU : On interdit formellement les plannings non autorisés
                     if p not in autorises:
                         prob += X[j, p, c] == 0, f"Interdit_{j}_{p}_{c}"
                     else:
@@ -142,42 +159,30 @@ def optimiser_planning_pulp(donnees_jour, resolution, joueurs_simultanes, assign
     return planning_jour, temps_global
 
 # --- GÉNÉRATEUR VISUEL ---
-# --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques, resolution):
     if not planning: return "<p>Aucun planning généré.</p>"
     couleurs = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF", "#FFFFFC"]
     map_couleurs = {j: couleurs[i % len(couleurs)] for i, j in enumerate(joueurs_uniques)}
     
-    # Tri des jours dans le bon ordre chronologique
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
     jours = sorted(list(set([p["Jour"] for p in planning])), key=lambda j: ordre_jours.get(j, 7))
-    
-    # Tri des horaires
     horaires_str = sorted(list(set([p["Horaire"] for p in planning])))
     
-    # Thème de couleurs pour les colonnes
     couleurs_colonnes = {"Planning 250": "#ffebee", "Planning 100": "#e8f5e9", "Planning 50": "#e3f2fd"}
     couleurs_cellules = {"Planning 250": "#fffafb", "Planning 100": "#fafffa", "Planning 50": "#fbfdff"}
     
     html = "<table style='width:100%; border-collapse: collapse; text-align: center; font-family: sans-serif; color: #333;'>"
-    
-    # Ligne 1 : Les Jours (Fusionnés)
     html += "<tr><th rowspan='2' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>Horaire</th>"
     for j in jours:
         html += f"<th colspan='3' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}</th>"
-    html += "</tr>"
-    
-    # Ligne 2 : Les Limites (Sous-colonnes)
-    html += "<tr>"
+    html += "</tr><tr>"
     for j in jours:
         html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 250']};'>250</th>"
         html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 100']};'>100</th>"
         html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 50']};'>50</th>"
     html += "</tr>"
     
-    # Contenu du tableau
     for h_str in horaires_str:
-        # Calcul de la plage horaire (ex: 08:00 - 08:30)
         h_obj = datetime.strptime(h_str, '%H:%M')
         h_fin_str = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
         plage_horaire = f"{h_str} - {h_fin_str}"
@@ -188,7 +193,6 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
             for p in ["Planning 250", "Planning 100", "Planning 50"]:
                 slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
                 bg_color = couleurs_cellules[p]
-                
                 html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {bg_color};'>"
                 if slot and slot["Joueurs_Liste"]:
                     for joueur in slot["Joueurs_Liste"]:
@@ -221,9 +225,8 @@ if not est_admin:
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             
-            # On crée la liste des horaires avec 23:59 pour simuler Minuit sans casser les maths
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
-
+            
             col1, col2 = st.columns(2)
             with col1: 
                 debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
@@ -254,7 +257,7 @@ if not est_admin:
                         donnees.append({
                             "id": str(uuid.uuid4()),
                             "nom": nom_joueur.strip(), "jour": j,
-                            "debut": debut_str, "fin": fin_str, # ICI : Plus de .strftime()
+                            "debut": debut_str, "fin": fin_str,
                             "limite_max": limite_max,
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
@@ -273,7 +276,8 @@ if not est_admin:
             for d in mes_dispos:
                 col_info, col_btn = st.columns([4, 1])
                 with col_info:
-                    st.write(f"**{d['jour']}** : {d['debut']} - {d['fin']} *(Limite: {d.get('limite_max', 'Non définie')})*")
+                    fin_affichee = "Minuit" if d['fin'] == "23:59" else d['fin']
+                    st.write(f"**{d['jour']}** : {d['debut']} - {fin_affichee} *(Limite: {d.get('limite_max', 'Non définie')})*")
                 with col_btn:
                     if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
@@ -288,7 +292,6 @@ if est_admin:
     if st.button("🗑️ Effacer la base de données"):
         sauvegarder_donnees([])
         st.session_state.assignations_forcees = []
-        # On remet aussi la matrice à zéro pour éviter tout conflit
         sauvegarder_matrice_affinites({
             "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
             "100": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
@@ -336,7 +339,6 @@ if est_admin:
         affinites_admin = charger_matrice_affinites()
         
         with st.form("form_affinites"):
-            # --- Pour la limite 250 (Accès à tout) ---
             st.markdown("**Pour les joueurs avec Limite Max = 250 :**")
             col_a1, col_b1, col_c1 = st.columns(3)
             with col_a1: val_250_250 = st.slider("Planning 250", 1, 5, affinites_admin.get("250", {}).get("Planning 250", 3), key="s_250_250")
@@ -345,19 +347,15 @@ if est_admin:
             affinites_admin["250"] = {"Planning 250": val_250_250, "Planning 100": val_100_250, "Planning 50": val_50_250}
             st.write("") 
             
-            # --- Pour la limite 100 (Accès à 100 et 50) ---
             st.markdown("**Pour les joueurs avec Limite Max = 100 :**")
             col_a2, col_b2 = st.columns(2)
             with col_a2: val_100_100 = st.slider("Planning 100", 1, 5, affinites_admin.get("100", {}).get("Planning 100", 3), key="s_100_100")
             with col_b2: val_50_100 = st.slider("Planning 50", 1, 5, affinites_admin.get("100", {}).get("Planning 50", 3), key="s_50_100")
-            # Le 250 est forcé à 1 en arrière-plan (même s'il est interdit par ailleurs)
             affinites_admin["100"] = {"Planning 250": 1, "Planning 100": val_100_100, "Planning 50": val_50_100}
             st.write("")
 
-            # --- Pour la limite 50 (Accès uniquement à 50) ---
             st.markdown("**Pour les joueurs avec Limite Max = 50 :**")
             val_50_50 = st.slider("Planning 50", 1, 5, affinites_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
-            # Le 250 et le 100 sont forcés à 1 en arrière-plan
             affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
             st.write("")
                 
