@@ -466,30 +466,6 @@ if not est_admin:
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
 
-        # --- NOUVEAU BOUTON : METTRE À JOUR LE PROFIL ---
-        st.markdown("---")
-        st.markdown("#### 🔄 Mettre à jour mon profil")
-        st.write("Un changement de rythme ? Appliquez vos paramètres actuels (nuit, max heures...) à tous vos créneaux existants d'un coup.")
-        
-        if st.button("Mettre à jour tous mes anciens créneaux", type="secondary"):
-            donnees_actuelles = charger_donnees()
-            creneaux_joueur = [d for d in donnees_actuelles if d["nom"] == nom_joueur.strip()]
-            
-            if not creneaux_joueur:
-                st.warning("Vous n'avez aucun créneau enregistré à mettre à jour.")
-            else:
-                with st.spinner("Mise à jour en cours..."):
-                    for d in creneaux_joueur:
-                        d["limite_max"] = limite_max
-                        d["heures_max_hebdo"] = heures_max_hebdo
-                        d["heures_max_jour"] = heures_max_jour
-                        d["t_max_affile"] = temps_max_affile
-                        d["t_min_base"] = creneau_min_base
-                        d["break_min_heavy"] = break_min_heavy
-                        d["intervalle_nuit"] = intervalle_nuit
-                        ajouter_dispo(d)
-                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique de nuit !")
-                st.rerun()
 
         st.markdown("---")
         st.subheader("Vos créneaux enregistrés")
