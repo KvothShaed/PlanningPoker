@@ -86,6 +86,11 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     
     SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
+    # --- VARIABLE DE LISSAGE (Ultra Légère) ---
+    Arrivee = pulp.LpVariable.dicts("Arrivee", 
+                                    ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))), 
+                                    lowBound=0, cat='Continuous')
+
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
     Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
@@ -119,7 +124,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             for jour, creneaux_j in creneaux_par_jour.items():
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
-            # --- LOGIQUE : ANCRAGE STRICT DE 5h ---
             intervalle = d_joueur.get("intervalle_nuit", "00:00 - 05:00")
             couche_min = intervalle.split(" - ")[0]
             
@@ -160,12 +164,23 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
+    # --- CONTRAINTE DE LISSAGE ---
+    for j in joueurs:
+        for p in PLANNINGS_DISPOS:
+            for i in range(1, len(creneaux_globaux)):
+                c_actuel = creneaux_globaux[i]
+                c_prec = creneaux_globaux[i-1]
+                prob += Arrivee[j, p, i] >= X[j, p, c_actuel] - X[j, p, c_prec], f"Arr_{j}_{p}_{i}"
+
     objectif = []
     
-    # On revient à un objectif simple et ultra-rapide à calculer
-    objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
+    # +10000 points pour jouer
+    objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
     
+    # -5 points de pénalité à chaque fois qu'un joueur "arrive" sur un planning (début de session ou changement)
+    objectif.append(-5 * pulp.lpSum(Arrivee[j, p, i] for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))))
+
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
@@ -223,54 +238,16 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # On repasse à 60 secondes, il n'aura même pas besoin de la moitié !
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
     
     if pulp.LpStatus[prob.status] == 'Optimal' or pulp.LpStatus[prob.status] == 'Not Solved':
-        
-        # --- 1. EXTRACTION DU PLANNING BRUT ---
-        assignments = {c: {p: [] for p in PLANNINGS_DISPOS} for c in creneaux_globaux}
-        for c_global in creneaux_globaux:
-            for p in PLANNINGS_DISPOS:
-                for j in joueurs:
-                    if pulp.value(X[j, p, c_global]) == 1:
-                        assignments[c_global][p].append(j)
-
-        # --- 2. LE COUP DE GÉNIE (LISSAGE POST-OPTIMISATION) ---
-        # "Ne change de limite que si tu y es obligé par la place"
-        for j in joueurs:
-            planning_actuel = None
-            for c_global in creneaux_globaux:
-                p_assigne = None
-                for p in PLANNINGS_DISPOS:
-                    if j in assignments[c_global][p]:
-                        p_assigne = p
-                        break
-                
-                if p_assigne:
-                    if planning_actuel is None:
-                        planning_actuel = p_assigne # Début de session
-                    elif p_assigne != planning_actuel:
-                        # Le joueur change de limite ! On vérifie s'il y avait de la place sur son ancienne limite
-                        if len(assignments[c_global][planning_actuel]) < joueurs_simultanes:
-                            # Il y a de la place ! On annule le changement.
-                            assignments[c_global][p_assigne].remove(j)
-                            assignments[c_global][planning_actuel].append(j)
-                        else:
-                            # Plus de place, il est obligé de changer. On met à jour sa nouvelle limite.
-                            planning_actuel = p_assigne
-                else:
-                    # Le joueur ne joue pas sur ce créneau (fin de session ou pause)
-                    planning_actuel = None 
-
-        # --- 3. RECONSTRUCTION DU PLANNING FINAL ---
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             for p in PLANNINGS_DISPOS:
-                joueurs_assignes = assignments[c_global][p]
+                joueurs_assignes = [j for j in joueurs if pulp.value(X[j, p, c_global]) == 1]
                 if joueurs_assignes:
                     planning_final.append({
                         "Jour": jour,
