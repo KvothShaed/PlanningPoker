@@ -164,7 +164,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     objectif = []
     
-    objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
+    objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
 
     for j in joueurs:
