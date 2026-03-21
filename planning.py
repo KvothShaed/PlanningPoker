@@ -8,7 +8,6 @@ import colorsys
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- NOUVEAUX IMPORTS POUR FIREBASE ---
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -29,24 +28,30 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # ==========================================
-# GESTION DES DONNÉES (CLOUD FIRESTORE)
+# GESTION DES DONNÉES (CLOUD FIRESTORE) AVEC CACHE
 # ==========================================
-
+@st.cache_data(ttl=60)
 def charger_donnees():
     docs = db.collection('dispos').stream()
     return [doc.to_dict() for doc in docs]
 
 def ajouter_dispo(dispo_data):
     db.collection('dispos').document(dispo_data["id"]).set(dispo_data)
+    charger_donnees.clear() # Vider le cache après écriture
 
 def supprimer_entree(id_entree):
     db.collection('dispos').document(id_entree).delete()
+    charger_donnees.clear()
 
 def vider_toutes_les_dispos():
     docs = db.collection('dispos').stream()
+    batch = db.batch() # Optimisation : Batch Write
     for doc in docs:
-        doc.reference.delete()
+        batch.delete(doc.reference)
+    batch.commit()
+    charger_donnees.clear()
 
+@st.cache_data(ttl=300)
 def charger_matrice_affinites():
     doc = db.collection('config').document('affinites').get()
     if doc.exists:
@@ -60,12 +65,75 @@ def charger_matrice_affinites():
 
 def sauvegarder_matrice_affinites(data):
     db.collection('config').document('affinites').set(data)
+    charger_matrice_affinites.clear()
 
+# ==========================================
+# CONNEXION GOOGLE SHEETS EN CACHE
+# ==========================================
+@st.cache_resource
+def get_gspread_client():
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
+    return gspread.authorize(creds)
+
+def mettre_a_jour_google_sheet(planning, resolution):
+    if not planning:
+        return
+        
+    client = get_gspread_client()
+    sheet_id = "1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic" 
+    sheet = client.open_by_key(sheet_id).sheet1
+
+    df = pd.DataFrame(planning)
+    if not df.empty:
+        df["Joueurs_Liste"] = df["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+        df["En_Tete"] = df["Jour"] + " | " + df["Planning"].str.replace("Planning ", "")
+        df_pivot = df.pivot(index="Horaire", columns="En_Tete", values="Joueurs_Liste").fillna("")
+        
+        jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+        plannings = ["250", "100", "50"]
+        
+        colonnes_triees = []
+        for j in jours:
+            for p in plannings:
+                nom_col = f"{j} | {p}"
+                if nom_col in df_pivot.columns:
+                    colonnes_triees.append(nom_col)
+                    
+        df_pivot = df_pivot[colonnes_triees]
+        df_export = df_pivot.reset_index()
+
+        def formater_horaire(h_str):
+            h_obj = datetime.strptime(h_str, '%H:%M')
+            h_fin = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
+            return f"{h_str} - {h_fin}"
+            
+        df_export["Horaire"] = df_export["Horaire"].apply(formater_horaire)
+
+        sheet.clear()
+        sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
+        sheet.freeze(rows=1, cols=1)
+        sheet.format("A1:Z1", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} 
+        })
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE HEBDOMADAIRE (PuLP) ---
 def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, assignations_forcees, matrice_affinites):
     if not donnees_totales:
         return [], {}
+
+    # --- OPTIMISATION : PRÉ-CALCUL DES DICTIONNAIRES (Complexité O(1)) ---
+    dict_joueurs = {d["nom"]: d for d in donnees_totales}
+    dict_dispos_jour = {}
+    for d in donnees_totales:
+        cle = f"{d['nom']}_{d['jour']}"
+        if cle not in dict_dispos_jour:
+            dict_dispos_jour[cle] = []
+        dict_dispos_jour[cle].append(d)
 
     prob = pulp.LpProblem("Optimisation_Hebdomadaire", pulp.LpMaximize)
     
@@ -81,18 +149,13 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     joueurs = list(set([d["nom"] for d in donnees_totales]))
     
-    # Seules les variables décisionnelles "maîtresses" restent Binaires
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
+    Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
     SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
-    # RELAXATION LINÉAIRE : Ces variables sont déclarées Continues pour décharger le solveur. 
-    # Elles prendront naturellement des valeurs entières grâce aux variables Binaires X.
-    Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), lowBound=0, upBound=1, cat='Continuous')
-    Arrivee = pulp.LpVariable.dicts("Arrivee", ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))), lowBound=0, cat='Continuous')
-    
-    Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Continuous')
-    Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Continuous')
-    Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Continuous')
+    Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
+    Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
+    Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
 
     plannings_autorises = {
         "250": ["Planning 250", "Planning 100", "Planning 50"],
@@ -113,7 +176,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
-        d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
+        # OPTIMISATION ICI
+        d_joueur = dict_joueurs.get(j)
         if d_joueur:
             max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
             prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
@@ -131,9 +195,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             
             if slots_nuit_standard > 0:
                 for i_jour, jour in enumerate(jours_semaine):
-                    if jour == "Dimanche":
-                        continue 
-                        
+                    if jour == "Dimanche": continue 
                     jour_suivant = jours_semaine[i_jour + 1] 
                     
                     if couche_min < "12:00":
@@ -143,15 +205,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                         
                     if c_ancre in creneaux_globaux:
                         idx_ancre = creneaux_globaux.index(c_ancre)
-                        
                         v_start = max(0, idx_ancre - marge_glissement)
                         v_end = idx_ancre
-                        
                         valid_starts = creneaux_globaux[v_start : v_end + 1]
                         
                         if valid_starts:
                             prob += pulp.lpSum(SleepStart[j, jour, s] for s in valid_starts) == 1, f"Doit_Dormir_{j}_{jour}"
-                            
                             for start_slot in valid_starts:
                                 s_idx = creneaux_globaux.index(start_slot)
                                 for k in range(slots_nuit_standard):
@@ -163,27 +222,18 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
-    # --- CONTRAINTE DE LISSAGE ---
-    for j in joueurs:
-        for p in PLANNINGS_DISPOS:
-            for i in range(1, len(creneaux_globaux)):
-                c_actuel = creneaux_globaux[i]
-                c_prec = creneaux_globaux[i-1]
-                prob += Arrivee[j, p, i] >= X[j, p, c_actuel] - X[j, p, c_prec], f"Arr_{j}_{p}_{i}"
-
     objectif = []
-    
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
-    
-    # -5 points de pénalité à chaque fois qu'un joueur "arrive" sur un planning
-    objectif.append(-5 * pulp.lpSum(Arrivee[j, p, i] for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))))
 
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             
-            d_jour = next((d for d in donnees_totales if d["nom"] == j and d["jour"] == jour and d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
+            # OPTIMISATION ICI
+            cle_recherche = f"{j}_{jour}"
+            dispos_j = dict_dispos_jour.get(cle_recherche, [])
+            d_jour = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
             
             if d_jour:
                 limite_joueur = str(d_jour.get("limite_max", 250))
@@ -198,7 +248,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                         objectif.append(valeur_pref * X[j, p, c_global])
             else:
                 prob += Y[j, c_global] == 0, f"Indispo_{j}_{c_global}"
-                
+            
     prob += pulp.lpSum(objectif)
 
     for c in creneaux_globaux:
@@ -206,7 +256,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
 
     for j in joueurs:
-        d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
+        d_joueur = dict_joueurs.get(j)
         if not d_joueur: continue
             
         max_slots = int(d_joueur["t_max_affile"] / resolution)
@@ -236,8 +286,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # Temps limite redescendu à 60s, avec gapRel pour sécuriser l'arrêt rapide si l'optimisation est déjà parfaite
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60, gapRel=0.05))
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -310,61 +359,13 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     html += "</table>"
     return html
 
-def mettre_a_jour_google_sheet(planning, resolution):
-    if not planning:
-        return
-        
-    scopes = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-    ]
-    creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
-    client = gspread.authorize(creds)
-
-    sheet_id = "1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic" 
-    sheet = client.open_by_key(sheet_id).sheet1
-
-    df = pd.DataFrame(planning)
-    
-    if not df.empty:
-        df["Joueurs_Liste"] = df["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
-        
-        df["En_Tete"] = df["Jour"] + " | " + df["Planning"].str.replace("Planning ", "")
-        
-        df_pivot = df.pivot(index="Horaire", columns="En_Tete", values="Joueurs_Liste").fillna("")
-        
-        jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-        plannings = ["250", "100", "50"]
-        
-        colonnes_triees = []
-        for j in jours:
-            for p in plannings:
-                nom_col = f"{j} | {p}"
-                if nom_col in df_pivot.columns:
-                    colonnes_triees.append(nom_col)
-                    
-        df_pivot = df_pivot[colonnes_triees]
-        df_export = df_pivot.reset_index()
-
-        def formater_horaire(h_str):
-            h_obj = datetime.strptime(h_str, '%H:%M')
-            h_fin = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
-            return f"{h_str} - {h_fin}"
-            
-        df_export["Horaire"] = df_export["Horaire"].apply(formater_horaire)
-
-        sheet.clear()
-        sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
-
-        sheet.freeze(rows=1, cols=1)
-        sheet.format("A1:Z1", {
-            "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} 
-        })
-
 # ==========================================
 # INTERFACE UTILISATEUR
 # ==========================================
+
+# CHARGEMENT GLOBAL DES DONNÉES (Évite les requêtes multiples dans l'UI)
+donnees_globales = charger_donnees()
+
 st.title("Générateur de Planning Unibet Multi-Limites 🗓️")
 
 with st.sidebar:
@@ -385,12 +386,9 @@ if not est_admin:
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
             
             st.markdown("#### ⚙️ Contraintes de rythme")
-            
             c_h, c_j = st.columns(2)
-            with c_h:
-                heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
-            with c_j:
-                heures_max_jour = st.number_input("Maximum d'heures / JOUR", value=6, step=1)
+            with c_h: heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
+            with c_j: heures_max_jour = st.number_input("Maximum d'heures / JOUR", value=6, step=1)
             
             c1, c2 = st.columns(2)
             with c1:
@@ -405,37 +403,25 @@ if not est_admin:
             st.markdown("---")
             st.markdown("#### 🌙 Nuit")
             st.write("Sélectionnez une sous-plage horaire de votre nuit")
-            
-            # Génération des 24 intervalles heure par heure avec un pas de 5h
             options_intervalle = [f"{h:02d}:00 - {(h+5)%24:02d}:00" for h in range(24)]
             intervalle_nuit = st.selectbox("Nuit intervalle (5h)", options_intervalle, index=options_intervalle.index("00:00 - 05:00"))
 
             st.markdown("---")
-            
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
-            
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
             
             col1, col2 = st.columns(2)
-            with col1: 
-                debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
-            with col2: 
-                fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
+            with col1: debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
+            with col2: fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
-            # BOUTON 1 : Soumission classique
             btn_ajouter = st.form_submit_button("Enregistrer pour ces jours")
             
             st.markdown("---")
             st.markdown("#### 🔄 Mettre à jour mon profil")
             st.write("Un changement de rythme ? Appliquez vos paramètres actuels (nuit, max heures...) à tous vos créneaux existants d'un coup.")
-            
-            # BOUTON 2 : Soumission pour la mise à jour globale
             btn_mettre_a_jour = st.form_submit_button("Mettre à jour tous mes anciens créneaux", type="secondary")
 
-        # --- LOGIQUE EN DEHORS DU FORMULAIRE ---
-        
-        # Si le joueur clique sur "Enregistrer pour ces jours"
         if btn_ajouter:
             if not jours_choisis:
                 st.error("Veuillez sélectionner au moins un jour.")
@@ -454,15 +440,11 @@ if not est_admin:
                         "intervalle_nuit": intervalle_nuit
                     }
                     ajouter_dispo(nouvelle_dispo)
-                    
                 st.success("Créneaux ajoutés avec succès !")
                 st.rerun()
 
-        # Si le joueur clique sur "Mettre à jour tous mes anciens créneaux"
         if btn_mettre_a_jour:
-            donnees_actuelles = charger_donnees()
-            creneaux_joueur = [d for d in donnees_actuelles if d["nom"] == nom_joueur.strip()]
-            
+            creneaux_joueur = [d for d in donnees_globales if d["nom"] == nom_joueur.strip()]
             if not creneaux_joueur:
                 st.warning("Vous n'avez aucun créneau enregistré à mettre à jour.")
             else:
@@ -475,14 +457,13 @@ if not est_admin:
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
                         d["intervalle_nuit"] = intervalle_nuit
-                        ajouter_dispo(d) 
+                        ajouter_dispo(d)
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
 
         st.markdown("---")
         st.subheader("Vos créneaux enregistrés")
-        donnees = charger_donnees()
-        mes_dispos = [d for d in donnees if d["nom"] == nom_joueur.strip()]
+        mes_dispos = [d for d in donnees_globales if d["nom"] == nom_joueur.strip()]
         
         if mes_dispos:
             for d in mes_dispos:
@@ -498,8 +479,7 @@ if not est_admin:
 # --- VUE 2 : L'ADMINISTRATEUR ---
 if est_admin:
     st.success("Mode Administrateur activé")
-    donnees = charger_donnees()
-    noms_dispos = list(set([d["nom"] for d in donnees])) if donnees else []
+    noms_dispos = list(set([d["nom"] for d in donnees_globales])) if donnees_globales else []
     
     if st.button("🗑️ Effacer la base de données"):
         vider_toutes_les_dispos()
@@ -515,11 +495,11 @@ if est_admin:
     tab_liste, tab_force, tab_param, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "⚙️ Paramètres", "🚀 Génération & Planning"])
 
     with tab_liste:
-        if donnees:
-            df = pd.DataFrame(donnees)
+        if donnees_globales:
+            df = pd.DataFrame(donnees_globales)
             st.dataframe(df.drop(columns=["id"]), use_container_width=True)
             
-            options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees}
+            options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees_globales}
             creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
             if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
                 for sel in creneaux_a_supprimer: 
@@ -548,8 +528,6 @@ if est_admin:
 
     with tab_param:
         st.subheader("Matrice des Affinités")
-        st.write("Définissez vers quels plannings orienter l'algorithme en fonction de la 'Limite Max' choisie par le joueur. *(1 = On évite, 5 = On priorise)*")
-        
         affinites_admin = charger_matrice_affinites()
         
         with st.form("form_affinites"):
@@ -559,29 +537,24 @@ if est_admin:
             with col_b1: val_100_250 = st.slider("Planning 100", 1, 5, affinites_admin.get("250", {}).get("Planning 100", 3), key="s_100_250")
             with col_c1: val_50_250 = st.slider("Planning 50", 1, 5, affinites_admin.get("250", {}).get("Planning 50", 3), key="s_50_250")
             affinites_admin["250"] = {"Planning 250": val_250_250, "Planning 100": val_100_250, "Planning 50": val_50_250}
-            st.write("") 
             
             st.markdown("**Pour les joueurs avec Limite Max = 100 :**")
             col_a2, col_b2 = st.columns(2)
             with col_a2: val_100_100 = st.slider("Planning 100", 1, 5, affinites_admin.get("100", {}).get("Planning 100", 3), key="s_100_100")
             with col_b2: val_50_100 = st.slider("Planning 50", 1, 5, affinites_admin.get("100", {}).get("Planning 50", 3), key="s_50_100")
             affinites_admin["100"] = {"Planning 250": 1, "Planning 100": val_100_100, "Planning 50": val_50_100}
-            st.write("")
 
             st.markdown("**Pour les joueurs avec Limite Max = 50 :**")
             val_50_50 = st.slider("Planning 50", 1, 5, affinites_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
             affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
-            st.write("")
 
             st.markdown("---")
-            st.markdown("**🛌 Paramètres de Santé & Repos :**")
             repos_nuit = st.number_input("Durée de la nuit obligatoire (Heures consécutives)", value=affinites_admin.get("repos_nuit_min", 10), step=1)
             affinites_admin["repos_nuit_min"] = repos_nuit
-            st.write("")
                 
             if st.form_submit_button("Enregistrer la matrice", type="primary"):
                 sauvegarder_matrice_affinites(affinites_admin)
-                st.success("Matrice enregistrée et appliquée pour les prochaines générations !")
+                st.success("Matrice enregistrée !")
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
@@ -590,24 +563,21 @@ if est_admin:
         with c2: joueurs_simultanes = st.number_input("Joueurs max par planning", value=1, min_value=1)
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
-            if not donnees:
+            if not donnees_globales:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                
-                with st.spinner('Le solveur calcule la répartition optimale sur toute la semaine...'):
+                with st.spinner('Calcul de la répartition optimale en cours... (Ce sera beaucoup plus rapide grâce au cache !)'):
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
-                        donnees, resolution, joueurs_simultanes, 
+                        donnees_globales, resolution, joueurs_simultanes, 
                         st.session_state.assignations_forcees, matrice
                     )
-                    
                     st.session_state.planning_complet = planning_complet
                 
                 if not planning_complet:
                     st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes et les disponibilités.")
                 else:
-                    st.success("Planning optimal trouvé pour la semaine !")
-                    
+                    st.success("Planning optimal trouvé !")
                     st.markdown("### 📅 Emploi du temps")
                     st.markdown(generer_grille_html(planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
                     
@@ -615,21 +585,17 @@ if est_admin:
                     stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in temps_totaux.items() if t > 0]
                     if stats_data:
                         df_stats = pd.DataFrame(stats_data)
-                        barres = alt.Chart(df_stats).mark_bar().encode(
-                            x=alt.X('Joueur:O', sort='-y'),
-                            y='Temps (Heures):Q'
-                        )
+                        barres = alt.Chart(df_stats).mark_bar().encode(x=alt.X('Joueur:O', sort='-y'), y='Temps (Heures):Q')
                         st.altair_chart(barres, use_container_width=True)
 
         if 'planning_complet' in st.session_state and st.session_state.planning_complet:
             st.markdown("---")
             st.markdown("### ☁️ Publication en ligne")
-            
             if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
-                with st.spinner("Envoi des données vers Google Sheets..."):
+                with st.spinner("Envoi des données..."):
                     try:
                         mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
-                        st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
+                        st.success("✅ Le Google Sheet a été mis à jour avec succès !")
                         st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
                     except Exception as e:
                         st.error(f"Erreur lors de la mise à jour : {e}")
