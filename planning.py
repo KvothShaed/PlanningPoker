@@ -87,10 +87,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     # NOUVELLE VARIABLE : Début de nuit
     SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
-    # ASTUCE OPTI : Variable continue qui ne s'active QUE lors d'un changement de limite en cours de session
+    # ASTUCE OPTI : Variable continue plafonnée à 1 pour traquer uniquement les sauts entre limites
     LimitSwitch = pulp.LpVariable.dicts("LimitSwitch", 
                                         ((j, i) for j in joueurs for i in range(1, len(creneaux_globaux))), 
-                                        lowBound=0, cat='Continuous')
+                                        lowBound=0, upBound=1, cat='Continuous')
 
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
@@ -147,15 +147,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                     if c_ancre in creneaux_globaux:
                         idx_ancre = creneaux_globaux.index(c_ancre)
                         
-                        # Le repos de 10h doit démarrer dans cette fenêtre très stricte
                         v_start = max(0, idx_ancre - marge_glissement)
                         v_end = idx_ancre
-                        
                         valid_starts = creneaux_globaux[v_start : v_end + 1]
                         
                         if valid_starts:
                             prob += pulp.lpSum(SleepStart[j, jour, s] for s in valid_starts) == 1, f"Doit_Dormir_{j}_{jour}"
-                            
                             for start_slot in valid_starts:
                                 s_idx = creneaux_globaux.index(start_slot)
                                 for k in range(slots_nuit_standard):
@@ -167,22 +164,24 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
-    # --- STABILITÉ : Isoler les vrais changements de limites (ignorer les débuts/fins de session) ---
+    # --- NOUVELLE LOGIQUE DE SWITCH : Isolement chirurgical des changements ---
     for j in joueurs:
         for i in range(1, len(creneaux_globaux)):
             c_actuel = creneaux_globaux[i]
             c_prec = creneaux_globaux[i-1]
             
-            for p in PLANNINGS_DISPOS:
-                # Si le joueur quitte le planning 'p' mais continue de jouer ailleurs (Y = 1), LimitSwitch est forcé à >= 1
-                prob += LimitSwitch[j, i] >= X[j, p, c_prec] - X[j, p, c_actuel] - (1 - Y[j, c_actuel]), f"Calc_Switch_{j}_{p}_{i}"
+            # On vérifie chaque paire de plannings (ex: 250 -> 100)
+            for p1 in PLANNINGS_DISPOS:
+                for p2 in PLANNINGS_DISPOS:
+                    if p1 != p2:
+                        prob += LimitSwitch[j, i] >= X[j, p1, c_prec] + X[j, p2, c_actuel] - 1, f"Switch_{j}_{p1}_{p2}_{i}"
 
     objectif = []
     
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
     
-    # Pénalité de -50 points EXCLUSIVEMENT quand un joueur saute d'une limite à l'autre sans faire de pause
+    # Pénalité de -50 points pour chaque changement strict de limite
     objectif.append(-50 * pulp.lpSum(LimitSwitch[j, i] for j in joueurs for i in range(1, len(creneaux_globaux))))
 
     for j in joueurs:
@@ -242,7 +241,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # Temps limite augmenté à 120 secondes par sécurité
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=120))
     
     planning_final = []
