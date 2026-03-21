@@ -81,19 +81,18 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     joueurs = list(set([d["nom"] for d in donnees_totales]))
     
+    # Seules les variables décisionnelles "maîtresses" restent Binaires
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
-    Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
-    
     SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
-    # --- VARIABLE DE LISSAGE (Ultra Légère) ---
-    Arrivee = pulp.LpVariable.dicts("Arrivee", 
-                                    ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))), 
-                                    lowBound=0, cat='Continuous')
-
-    Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
-    Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
-    Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
+    # RELAXATION LINÉAIRE : Ces variables sont déclarées Continues pour décharger le solveur. 
+    # Elles prendront naturellement des valeurs entières grâce aux variables Binaires X.
+    Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), lowBound=0, upBound=1, cat='Continuous')
+    Arrivee = pulp.LpVariable.dicts("Arrivee", ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))), lowBound=0, cat='Continuous')
+    
+    Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Continuous')
+    Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Continuous')
+    Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Continuous')
 
     plannings_autorises = {
         "250": ["Planning 250", "Planning 100", "Planning 50"],
@@ -174,11 +173,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     objectif = []
     
-    # +10000 points pour jouer
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
     
-    # -5 points de pénalité à chaque fois qu'un joueur "arrive" sur un planning (début de session ou changement)
+    # -5 points de pénalité à chaque fois qu'un joueur "arrive" sur un planning
     objectif.append(-5 * pulp.lpSum(Arrivee[j, p, i] for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))))
 
     for j in joueurs:
@@ -238,8 +236,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # AJOUT MAJEUR : timeLimit à 120s ET gapRel à 0.05 (Il s'arrêtera dès qu'il est optimal à 95%)
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=120, gapRel=0.05))
+    # Temps limite redescendu à 60s, avec gapRel pour sécuriser l'arrêt rapide si l'optimisation est déjà parfaite
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60, gapRel=0.05))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
