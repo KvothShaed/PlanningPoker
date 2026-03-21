@@ -120,45 +120,42 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             for jour, creneaux_j in creneaux_par_jour.items():
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
-            # --- LA NOUVELLE LOGIQUE : REPOS GLISSANT DE 10h SUR POINT D'ANCRAGE DE 6h ---
-            intervalle = d_joueur.get("intervalle_nuit", "00:00 - 06:00")
-            couche_min, leve_max = intervalle.split(" - ")
+            # --- LA NOUVELLE LOGIQUE : ANCRAGE STRICT DE 5h ---
+            intervalle = d_joueur.get("intervalle_nuit", "00:00 - 05:00")
+            couche_min = intervalle.split(" - ")[0]
+            
+            slots_ancre = int(5 * 60 / resolution)
+            marge_glissement = max(0, slots_nuit_standard - slots_ancre)
             
             if slots_nuit_standard > 0:
                 for i_jour, jour in enumerate(jours_semaine):
-                    
                     if jour == "Dimanche":
                         continue 
                         
                     jour_suivant = jours_semaine[i_jour + 1] 
                     
-                    # Cadrage intelligent selon l'heure choisie
                     if couche_min < "12:00":
-                        c_start = f"{jour_suivant}_{couche_min}"
-                        c_end = f"{jour_suivant}_{leve_max}"
+                        c_ancre = f"{jour_suivant}_{couche_min}"
                     else:
-                        c_start = f"{jour}_{couche_min}"
-                        c_end = f"{jour_suivant}_{leve_max}"
+                        c_ancre = f"{jour}_{couche_min}"
                         
-                    if c_start in creneaux_globaux and c_end in creneaux_globaux:
-                        idx_start = creneaux_globaux.index(c_start)
-                        idx_end = creneaux_globaux.index(c_end)
+                    if c_ancre in creneaux_globaux:
+                        idx_ancre = creneaux_globaux.index(c_ancre)
                         
-                        # Création de la zone de glissement valide pour que les 10h CHEVAUCHENT l'intervalle de 6h
-                        v_start = max(0, idx_start - slots_nuit_standard + 1)
-                        v_end = min(len(creneaux_globaux) - slots_nuit_standard, idx_end - 1)
+                        # Le repos de 10h doit démarrer dans cette fenêtre très stricte
+                        v_start = max(0, idx_ancre - marge_glissement)
+                        v_end = idx_ancre
                         
-                        if v_start <= v_end:
-                            valid_starts = creneaux_globaux[v_start : v_end + 1]
-                            
-                            # On force le solveur à choisir exactement 1 point de départ dans cette zone de glissement
+                        valid_starts = creneaux_globaux[v_start : v_end + 1]
+                        
+                        if valid_starts:
                             prob += pulp.lpSum(SleepStart[j, jour, s] for s in valid_starts) == 1, f"Doit_Dormir_{j}_{jour}"
                             
-                            # Les 10h consécutives (Y=0) à partir de ce point
                             for start_slot in valid_starts:
                                 s_idx = creneaux_globaux.index(start_slot)
                                 for k in range(slots_nuit_standard):
-                                    prob += Y[j, creneaux_globaux[s_idx + k]] <= 1 - SleepStart[j, jour, start_slot], f"Dort_{j}_{jour}_{start_slot}_{k}"
+                                    if s_idx + k < len(creneaux_globaux):
+                                        prob += Y[j, creneaux_globaux[s_idx + k]] <= 1 - SleepStart[j, jour, start_slot], f"Dort_{j}_{jour}_{start_slot}_{k}"
 
     for c in creneaux_globaux:
         for j in joueurs:
@@ -394,11 +391,11 @@ if not est_admin:
             
             st.markdown("---")
             st.markdown("#### 🌙 Nuit")
-            st.write("Sélectionnez la plage de 6h dans laquelle l'algorithme doit placer votre nuit garantissant un break minimum entre coupure et reprise")
+            st.write("Sélectionnez la plage de 5h dans laquelle l'algorithme doit placer votre nuit garantissant un break minimum entre coupure et reprise")
             
-            # Génération des 24 intervalles heure par heure avec un pas de 6h
-            options_intervalle = [f"{h:02d}:00 - {(h+6)%24:02d}:00" for h in range(24)]
-            intervalle_nuit = st.selectbox("Nuit intervalle (6h)", options_intervalle, index=options_intervalle.index("00:00 - 06:00"))
+            # Génération des 24 intervalles heure par heure avec un pas de 5h
+            options_intervalle = [f"{h:02d}:00 - {(h+5)%24:02d}:00" for h in range(24)]
+            intervalle_nuit = st.selectbox("Nuit intervalle (5h)", options_intervalle, index=options_intervalle.index("00:00 - 05:00"))
 
             st.markdown("---")
             
@@ -434,6 +431,31 @@ if not est_admin:
                         
                     st.success("Créneaux ajoutés avec succès !")
                     st.rerun()
+
+        # --- NOUVEAU BOUTON : METTRE À JOUR LE PROFIL ---
+        st.markdown("---")
+        st.markdown("#### 🔄 Mettre à jour mon profil")
+        st.write("Un changement de rythme ? Appliquez vos paramètres actuels (nuit, max heures...) à tous vos créneaux existants d'un coup.")
+        
+        if st.button("Mettre à jour tous mes anciens créneaux", type="secondary"):
+            donnees_actuelles = charger_donnees()
+            creneaux_joueur = [d for d in donnees_actuelles if d["nom"] == nom_joueur.strip()]
+            
+            if not creneaux_joueur:
+                st.warning("Vous n'avez aucun créneau enregistré à mettre à jour.")
+            else:
+                with st.spinner("Mise à jour en cours..."):
+                    for d in creneaux_joueur:
+                        d["limite_max"] = limite_max
+                        d["heures_max_hebdo"] = heures_max_hebdo
+                        d["heures_max_jour"] = heures_max_jour
+                        d["t_max_affile"] = temps_max_affile
+                        d["t_min_base"] = creneau_min_base
+                        d["break_min_heavy"] = break_min_heavy
+                        d["intervalle_nuit"] = intervalle_nuit
+                        ajouter_dispo(d)
+                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique de nuit !")
+                st.rerun()
 
         st.markdown("---")
         st.subheader("Vos créneaux enregistrés")
