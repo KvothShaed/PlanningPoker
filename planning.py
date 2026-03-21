@@ -242,7 +242,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
+    # Temps limite augmenté à 120 secondes par sécurité
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=120))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
