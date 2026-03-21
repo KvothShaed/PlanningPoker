@@ -410,27 +410,61 @@ if not est_admin:
             with col2: 
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
-            if st.form_submit_button("Enregistrer pour ces jours"):
-                if not jours_choisis:
-                    st.error("Veuillez sélectionner au moins un jour.")
-                else:
-                    for j in jours_choisis:
-                        nouvelle_dispo = {
-                            "id": str(uuid.uuid4()),
-                            "nom": nom_joueur.strip(), "jour": j,
-                            "debut": debut_str, "fin": fin_str,
-                            "limite_max": limite_max,
-                            "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
-                            "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
-                            "t_min_adj": creneau_min_adj,
-                            "heures_max_hebdo": heures_max_hebdo,
-                            "heures_max_jour": heures_max_jour,
-                            "intervalle_nuit": intervalle_nuit
-                        }
-                        ajouter_dispo(nouvelle_dispo)
-                        
-                    st.success("Créneaux ajoutés avec succès !")
-                    st.rerun()
+            # BOUTON 1 : Soumission classique
+            btn_ajouter = st.form_submit_button("Enregistrer pour ces jours")
+            
+            st.markdown("---")
+            st.markdown("#### 🔄 Mettre à jour mon profil")
+            st.write("Un changement de rythme ? Appliquez vos paramètres actuels (nuit, max heures...) à tous vos créneaux existants d'un coup.")
+            
+            # BOUTON 2 : Soumission pour la mise à jour globale
+            btn_mettre_a_jour = st.form_submit_button("Mettre à jour tous mes anciens créneaux", type="secondary")
+
+        # --- LOGIQUE EN DEHORS DU FORMULAIRE ---
+        
+        # Si le joueur clique sur "Enregistrer pour ces jours"
+        if btn_ajouter:
+            if not jours_choisis:
+                st.error("Veuillez sélectionner au moins un jour.")
+            else:
+                for j in jours_choisis:
+                    nouvelle_dispo = {
+                        "id": str(uuid.uuid4()),
+                        "nom": nom_joueur.strip(), "jour": j,
+                        "debut": debut_str, "fin": fin_str,
+                        "limite_max": limite_max,
+                        "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
+                        "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
+                        "t_min_adj": creneau_min_adj,
+                        "heures_max_hebdo": heures_max_hebdo,
+                        "heures_max_jour": heures_max_jour,
+                        "intervalle_nuit": intervalle_nuit
+                    }
+                    ajouter_dispo(nouvelle_dispo)
+                    
+                st.success("Créneaux ajoutés avec succès !")
+                st.rerun()
+
+        # Si le joueur clique sur "Mettre à jour tous mes anciens créneaux"
+        if btn_mettre_a_jour:
+            donnees_actuelles = charger_donnees()
+            creneaux_joueur = [d for d in donnees_actuelles if d["nom"] == nom_joueur.strip()]
+            
+            if not creneaux_joueur:
+                st.warning("Vous n'avez aucun créneau enregistré à mettre à jour.")
+            else:
+                with st.spinner("Mise à jour en cours..."):
+                    for d in creneaux_joueur:
+                        d["limite_max"] = limite_max
+                        d["heures_max_hebdo"] = heures_max_hebdo
+                        d["heures_max_jour"] = heures_max_jour
+                        d["t_max_affile"] = temps_max_affile
+                        d["t_min_base"] = creneau_min_base
+                        d["break_min_heavy"] = break_min_heavy
+                        d["intervalle_nuit"] = intervalle_nuit
+                        ajouter_dispo(d) # Firebase .set() écrase l'ancien document avec le même ID, ce qui fait office de mise à jour
+                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
+                st.rerun()
 
         # --- NOUVEAU BOUTON : METTRE À JOUR LE PROFIL ---
         st.markdown("---")
