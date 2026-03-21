@@ -391,7 +391,7 @@ if not est_admin:
             
             st.markdown("---")
             st.markdown("#### 🌙 Nuit")
-            st.write("Sélectionnez la plage de 5h dans laquelle l'algorithme doit placer votre nuit garantissant un break minimum entre coupure et reprise")
+            st.write("Sélectionnez une sous-plage horaire de votre nuit")
             
             # Génération des 24 intervalles heure par heure avec un pas de 5h
             options_intervalle = [f"{h:02d}:00 - {(h+5)%24:02d}:00" for h in range(24)]
