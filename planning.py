@@ -62,7 +62,8 @@ def charger_matrice_affinites():
     return {
         "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
         "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
-        "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3}
+        "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
+        "repos_nuit_min": 10 # Ajout de la valeur par défaut pour la nuit
     }
 
 def sauvegarder_matrice_affinites(data):
@@ -90,6 +91,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
+    
+    # NOUVELLE VARIABLE : Début de nuit
+    SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
@@ -101,23 +105,72 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
+    # Préparation : Créneaux par jour pour le Max Heures/Jour
+    creneaux_par_jour = {jour: [] for jour in jours_semaine}
+    for c in creneaux_globaux:
+        jour_str = c.split("_")[0]
+        creneaux_par_jour[jour_str].append(c)
+        
+    # Paramètres de nuit demandés par l'admin
+    heures_nuit = matrice_affinites.get("repos_nuit_min", 10)
+    slots_nuit_standard = int((heures_nuit * 60) / resolution)
+
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
-        # --- NOUVELLE CONTRAINTE : MAX HEURES HEBDO ---
-        # On cherche les infos de ce joueur (on prend n'importe quelle dispo pour avoir son paramétrage)
         d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
         if d_joueur:
-            # On récupère la valeur saisie, ou 168h (une semaine complète) par défaut si ce sont d'anciennes données
-            max_h_hebdo = d_joueur.get("heures_max_hebdo", 168)
+            # --- MAX HEURES HEBDO ---
+            max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
+            prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-            # Conversion : Heures -> Minutes -> Nombre de créneaux (slots)
-            max_slots_hebdo = int((max_h_hebdo * 60) / resolution)
+            # --- MAX HEURES JOUR ---
+            max_h_jour = d_joueur.get("heures_max_jour", 6)
+            max_slots_jour = int((max_h_jour * 60) / resolution)
+            for jour, creneaux_j in creneaux_par_jour.items():
+                prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
+
+            # --- INTERVALLE DE NUIT ---
+            intervalle = d_joueur.get("intervalle_nuit", "00:00 - 12:00")
+            couche_min, leve_max = intervalle.split(" - ")
             
-            # Application stricte de la contrainte au solveur
-            prob += Temps_Total[j] <= max_slots_hebdo, f"Limite_Heures_Hebdo_{j}"
+            if slots_nuit_standard > 0:
+                for i_jour, jour in enumerate(jours_semaine):
+                    
+                    # Règle d'ignorance totale du dimanche pour la nuit
+                    if jour == "Dimanche":
+                        continue 
+                        
+                    jour_suivant = jours_semaine[i_jour + 1] 
+                    
+                    creneaux_nuit = []
+                    # 1. Soirée
+                    for c in creneaux_globaux:
+                        j_str, h_str = c.split("_")
+                        if j_str == jour and h_str >= couche_min:
+                            creneaux_nuit.append(c)
+                            
+                    # 2. Matinée du lendemain
+                    for c in creneaux_globaux:
+                        j_str, h_str = c.split("_")
+                        if j_str == jour_suivant and h_str < leve_max:
+                            creneaux_nuit.append(c)
+                            
+                    # 3. Placement du repos de 10h
+                    if len(creneaux_nuit) >= slots_nuit_standard:
+                        valid_starts = creneaux_nuit[:len(creneaux_nuit) - slots_nuit_standard + 1]
+                        
+                        prob += pulp.lpSum(SleepStart[j, jour, s] for s in valid_starts) == 1, f"Doit_Dormir_{j}_{jour}"
+                        
+                        for idx, start_slot in enumerate(valid_starts):
+                            for k in range(slots_nuit_standard):
+                                cible_slot = creneaux_nuit[idx + k]
+                                prob += Y[j, cible_slot] <= 1 - SleepStart[j, jour, start_slot], f"Dort_{j}_{jour}_{start_slot}_{k}"
+                    else:
+                        for c in creneaux_nuit:
+                            prob += Y[j, c] == 0, f"Erreur_Fenetre_{j}_{jour}_{c}"
 
     for c in creneaux_globaux:
         for j in joueurs:
@@ -186,13 +239,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # --- AJOUT DE LA LIMITE DE TEMPS (60 SECONDES) ---
+    # Limite de temps à 60 secondes pour le solveur
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
     
-    # Le solveur peut retourner 'Optimal' ou 'Not Solved' si arrêté par le temps mais ayant trouvé une solution valide
     if pulp.LpStatus[prob.status] == 'Optimal' or pulp.LpStatus[prob.status] == 'Not Solved':
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
@@ -214,20 +266,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 def generer_grille_html(planning, joueurs_uniques, resolution):
     if not planning: return "<p>Aucun planning généré.</p>"
     
-    # --- NOUVELLE GESTION DES COULEURS DYNAMIQUES ---
     n_joueurs = len(joueurs_uniques)
     map_couleurs = {}
     
     for i, joueur in enumerate(joueurs_uniques):
-        # On divise le cercle des couleurs (de 0 à 1) de manière parfaitement égale
         hue = i / n_joueurs if n_joueurs > 0 else 0
-        
-        # hls_to_rgb prend (Teinte, Luminosité, Saturation)
-        # Luminosité à 0.85 = clair (pour bien lire le texte noir)
-        # Saturation à 0.8 = couleurs bien vives et distinctes
         r, g, b = colorsys.hls_to_rgb(hue, 0.85, 0.8)
-        
-        # On convertit le résultat en code couleur HTML (#RRGGBB)
         map_couleurs[joueur] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
     
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
@@ -269,11 +313,11 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     html += "</table>"
     return html
 
-def mettre_a_jour_google_sheet(planning):
+# --- AJOUT DE LA RÉSOLUTION COMME PARAMÈTRE ICI ---
+def mettre_a_jour_google_sheet(planning, resolution):
     if not planning:
         return
         
-    # 1. Authentification
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
@@ -281,24 +325,18 @@ def mettre_a_jour_google_sheet(planning):
     creds = Credentials.from_service_account_info(dict(st.secrets["google_sheets"]), scopes=scopes)
     client = gspread.authorize(creds)
 
-    # N'OUBLIE PAS DE REMETTRE TON ID ICI
     sheet_id = "1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic" 
     sheet = client.open_by_key(sheet_id).sheet1
 
-    # 2. Préparation et Pivot des données pour faire une belle grille
     df = pd.DataFrame(planning)
     
     if not df.empty:
-        # Transformer la liste des joueurs en texte simple
         df["Joueurs_Liste"] = df["Joueurs_Liste"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
         
-        # Créer l'en-tête de colonne (Ex: "Lundi | 250")
         df["En_Tete"] = df["Jour"] + " | " + df["Planning"].str.replace("Planning ", "")
         
-        # Croiser les données (Heures en lignes, Jours/Limites en colonnes)
         df_pivot = df.pivot(index="Horaire", columns="En_Tete", values="Joueurs_Liste").fillna("")
         
-        # Forcer un ordre logique (Lundi -> Dimanche, 250 -> 50)
         jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
         plannings = ["250", "100", "50"]
         
@@ -310,14 +348,25 @@ def mettre_a_jour_google_sheet(planning):
                     colonnes_triees.append(nom_col)
                     
         df_pivot = df_pivot[colonnes_triees]
-        
-        # Remettre "Horaire" comme première colonne normale
         df_export = df_pivot.reset_index()
 
-        # 3. Envoi des données propres vers Google Sheets
+        # --- FORMATAGE DU TEXTE DES HEURES ---
+        def formater_horaire(h_str):
+            h_obj = datetime.strptime(h_str, '%H:%M')
+            h_fin = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
+            return f"{h_str} - {h_fin}"
+            
+        df_export["Horaire"] = df_export["Horaire"].apply(formater_horaire)
+
         sheet.clear()
         sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
 
+        # --- OPTIONS VISUELLES GOOGLE SHEETS ---
+        sheet.freeze(rows=1, cols=1) # Figer les colonnes/lignes
+        sheet.format("A1:Z1", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} # En-tête gris
+        })
 
 # ==========================================
 # INTERFACE UTILISATEUR
@@ -341,9 +390,13 @@ if not est_admin:
             st.markdown("#### 🎯 Paramètres du Joueur")
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
             
-            # --- CONTRAINTES DE RYTHME ---
             st.markdown("#### ⚙️ Contraintes de rythme")
-            heures_max_hebdo = st.number_input("Maximum d'heures sur la semaine", value=100, step=1)
+            
+            c_h, c_j = st.columns(2)
+            with c_h:
+                heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
+            with c_j:
+                heures_max_jour = st.number_input("Maximum d'heures / JOUR", value=6, step=1)
             
             c1, c2 = st.columns(2)
             with c1:
@@ -355,6 +408,19 @@ if not est_admin:
             break_max_cond = 30
             creneau_min_adj = 30
             
+            # --- MENU DÉROULANT : INTERVALLE DE NUIT ---
+            st.markdown("---")
+            st.markdown("#### 🌙 Paramètres de Nuit (Intervalle de sommeil)")
+            st.write("Sélectionnez la plage de 12h dans laquelle l'algorithme doit placer votre vraie nuit de repos.")
+            options_intervalle = [
+                "21:00 - 09:00", "21:30 - 09:30", "22:00 - 10:00", "22:30 - 10:30",
+                "23:00 - 11:00", "23:30 - 11:30", "00:00 - 12:00", "00:30 - 12:30",
+                "01:00 - 13:00", "01:30 - 13:30", "02:00 - 14:00", "02:30 - 14:30",
+                "03:00 - 15:00", "03:30 - 15:30", "04:00 - 16:00", "04:30 - 16:30",
+                "05:00 - 17:00", "05:30 - 17:30", "06:00 - 18:00"
+            ]
+            intervalle_nuit = st.selectbox("Nuit intervalle (12h)", options_intervalle, index=options_intervalle.index("00:00 - 12:00"))
+
             st.markdown("---")
             
             # --- SÉLECTION DES JOURS/HEURES ---
@@ -369,7 +435,6 @@ if not est_admin:
             with col2: 
                 fin_str = st.selectbox("Départ", liste_heures, index=liste_heures.index("22:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
                 
-            # --- SOUMISSION DU FORMULAIRE ---
             if st.form_submit_button("Enregistrer pour ces jours"):
                 if not jours_choisis:
                     st.error("Veuillez sélectionner au moins un jour.")
@@ -383,7 +448,9 @@ if not est_admin:
                             "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
                             "t_min_adj": creneau_min_adj,
-                            "heures_max_hebdo": heures_max_hebdo
+                            "heures_max_hebdo": heures_max_hebdo,
+                            "heures_max_jour": heures_max_jour,
+                            "intervalle_nuit": intervalle_nuit
                         }
                         ajouter_dispo(nouvelle_dispo)
                         
@@ -418,7 +485,8 @@ if est_admin:
         sauvegarder_matrice_affinites({
             "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
             "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
-            "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3}
+            "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
+            "repos_nuit_min": 10
         })
         st.rerun()
 
@@ -482,6 +550,12 @@ if est_admin:
             val_50_50 = st.slider("Planning 50", 1, 5, affinites_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
             affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
             st.write("")
+
+            st.markdown("---")
+            st.markdown("**🛌 Paramètres de Santé & Repos :**")
+            repos_nuit = st.number_input("Durée de la nuit obligatoire (Heures consécutives)", value=affinites_admin.get("repos_nuit_min", 10), step=1)
+            affinites_admin["repos_nuit_min"] = repos_nuit
+            st.write("")
                 
             if st.form_submit_button("Enregistrer la matrice", type="primary"):
                 sauvegarder_matrice_affinites(affinites_admin)
@@ -505,7 +579,6 @@ if est_admin:
                         st.session_state.assignations_forcees, matrice
                     )
                     
-                    # --- NOUVEAUTÉ : ON SAUVEGARDE EN MÉMOIRE POUR LE BOUTON GOOGLE SHEET ---
                     st.session_state.planning_complet = planning_complet
                 
                 if not planning_complet:
@@ -526,8 +599,6 @@ if est_admin:
                         )
                         st.altair_chart(barres, use_container_width=True)
 
-        # --- NOUVEAU BLOC : EXPORT GOOGLE SHEETS (DANS L'ONGLET TAB_GEN) ---
-        # On vérifie qu'un planning a bien été sauvegardé dans la mémoire au moment du clic précédent
         if 'planning_complet' in st.session_state and st.session_state.planning_complet:
             st.markdown("---")
             st.markdown("### ☁️ Publication en ligne")
@@ -535,9 +606,9 @@ if est_admin:
             if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
                 with st.spinner("Envoi des données vers Google Sheets..."):
                     try:
-                        # On récupère les données enregistrées dans le session_state
-                        mettre_a_jour_google_sheet(st.session_state.planning_complet)
+                        mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
                         st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
-                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit?gid=0#gid=0)")
+                        # Lien corrigé (propre)
+                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
                     except Exception as e:
                         st.error(f"Erreur lors de la mise à jour : {e}")
