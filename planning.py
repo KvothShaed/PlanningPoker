@@ -87,6 +87,11 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     # NOUVELLE VARIABLE : Début de nuit
     SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
 
+    # --- NOUVEAU : STABILITÉ --- Variable pour tracker si on reste sur le même planning
+    Continue = pulp.LpVariable.dicts("Continue", 
+                                     ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))), 
+                                     cat='Binary')
+
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
     Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
@@ -120,7 +125,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             for jour, creneaux_j in creneaux_par_jour.items():
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
-            # --- LA NOUVELLE LOGIQUE : ANCRAGE STRICT DE 5h ---
+            # --- LOGIQUE : ANCRAGE STRICT DE 5h ---
             intervalle = d_joueur.get("intervalle_nuit", "00:00 - 05:00")
             couche_min = intervalle.split(" - ")[0]
             
@@ -162,10 +167,22 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += Y[j, c] == pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS), f"Lien_XY_{j}_{c}"
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
+    # --- NOUVEAU : STABILITÉ --- Lier la variable "Continue" à l'action réelle
+    for j in joueurs:
+        for p in PLANNINGS_DISPOS:
+            for i in range(1, len(creneaux_globaux)):
+                c_actuel = creneaux_globaux[i]
+                c_prec = creneaux_globaux[i-1]
+                prob += Continue[j, p, i] <= X[j, p, c_actuel], f"ContA_{j}_{p}_{i}"
+                prob += Continue[j, p, i] <= X[j, p, c_prec], f"ContB_{j}_{p}_{i}"
+
     objectif = []
     
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
+    
+    # --- NOUVEAU : STABILITÉ --- Bonus de 5 points pour chaque créneau consécutif sur la même limite
+    objectif.append(5 * pulp.lpSum(Continue[j, p, i] for j in joueurs for p in PLANNINGS_DISPOS for i in range(1, len(creneaux_globaux))))
 
     for j in joueurs:
         for c_global in creneaux_globaux:
@@ -462,10 +479,9 @@ if not est_admin:
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
                         d["intervalle_nuit"] = intervalle_nuit
-                        ajouter_dispo(d) # Firebase .set() écrase l'ancien document avec le même ID, ce qui fait office de mise à jour
+                        ajouter_dispo(d) 
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
-
 
         st.markdown("---")
         st.subheader("Vos créneaux enregistrés")
