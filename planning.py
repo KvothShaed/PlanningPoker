@@ -22,13 +22,10 @@ if 'assignations_forcees' not in st.session_state:
 # ==========================================
 # INITIALISATION DE FIREBASE
 # ==========================================
-# Vérifie si l'application Firebase est déjà initialisée pour éviter les erreurs au rechargement
 if not firebase_admin._apps:
-    # On charge les identifiants secrets depuis Streamlit (st.secrets)
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
-# On crée le client pour interagir avec la base de données Firestore
 db = firestore.client()
 
 # ==========================================
@@ -36,20 +33,16 @@ db = firestore.client()
 # ==========================================
 
 def charger_donnees():
-    # Récupère tous les documents dans la collection "dispos"
     docs = db.collection('dispos').stream()
     return [doc.to_dict() for doc in docs]
 
 def ajouter_dispo(dispo_data):
-    # Ajoute ou met à jour un document avec son ID unique
     db.collection('dispos').document(dispo_data["id"]).set(dispo_data)
 
 def supprimer_entree(id_entree):
-    # Supprime un document spécifique
     db.collection('dispos').document(id_entree).delete()
 
 def vider_toutes_les_dispos():
-    # Fonction pour l'admin : supprime tous les créneaux
     docs = db.collection('dispos').stream()
     for doc in docs:
         doc.reference.delete()
@@ -58,12 +51,11 @@ def charger_matrice_affinites():
     doc = db.collection('config').document('affinites').get()
     if doc.exists:
         return doc.to_dict()
-    # Valeur par défaut si la base est vide
     return {
         "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
         "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
         "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
-        "repos_nuit_min": 10 # Ajout de la valeur par défaut pour la nuit
+        "repos_nuit_min": 10
     }
 
 def sauvegarder_matrice_affinites(data):
@@ -105,13 +97,11 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
-    # Préparation : Créneaux par jour pour le Max Heures/Jour
     creneaux_par_jour = {jour: [] for jour in jours_semaine}
     for c in creneaux_globaux:
         jour_str = c.split("_")[0]
         creneaux_par_jour[jour_str].append(c)
         
-    # Paramètres de nuit demandés par l'admin
     heures_nuit = matrice_affinites.get("repos_nuit_min", 10)
     slots_nuit_standard = int((heures_nuit * 60) / resolution)
 
@@ -122,43 +112,36 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
         d_joueur = next((d for d in donnees_totales if d["nom"] == j), None)
         if d_joueur:
-            # --- MAX HEURES HEBDO ---
             max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
             prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-            # --- MAX HEURES JOUR ---
             max_h_jour = d_joueur.get("heures_max_jour", 6)
             max_slots_jour = int((max_h_jour * 60) / resolution)
             for jour, creneaux_j in creneaux_par_jour.items():
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
-            # --- INTERVALLE DE NUIT ---
             intervalle = d_joueur.get("intervalle_nuit", "00:00 - 12:00")
             couche_min, leve_max = intervalle.split(" - ")
             
             if slots_nuit_standard > 0:
                 for i_jour, jour in enumerate(jours_semaine):
                     
-                    # Règle d'ignorance totale du dimanche pour la nuit
                     if jour == "Dimanche":
                         continue 
                         
                     jour_suivant = jours_semaine[i_jour + 1] 
                     
                     creneaux_nuit = []
-                    # 1. Soirée
                     for c in creneaux_globaux:
                         j_str, h_str = c.split("_")
                         if j_str == jour and h_str >= couche_min:
                             creneaux_nuit.append(c)
                             
-                    # 2. Matinée du lendemain
                     for c in creneaux_globaux:
                         j_str, h_str = c.split("_")
                         if j_str == jour_suivant and h_str < leve_max:
                             creneaux_nuit.append(c)
                             
-                    # 3. Placement du repos de 10h
                     if len(creneaux_nuit) >= slots_nuit_standard:
                         valid_starts = creneaux_nuit[:len(creneaux_nuit) - slots_nuit_standard + 1]
                         
@@ -239,7 +222,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # Limite de temps à 60 secondes pour le solveur
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
     
     planning_final = []
@@ -313,7 +295,6 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
     html += "</table>"
     return html
 
-# --- AJOUT DE LA RÉSOLUTION COMME PARAMÈTRE ICI ---
 def mettre_a_jour_google_sheet(planning, resolution):
     if not planning:
         return
@@ -350,7 +331,6 @@ def mettre_a_jour_google_sheet(planning, resolution):
         df_pivot = df_pivot[colonnes_triees]
         df_export = df_pivot.reset_index()
 
-        # --- FORMATAGE DU TEXTE DES HEURES ---
         def formater_horaire(h_str):
             h_obj = datetime.strptime(h_str, '%H:%M')
             h_fin = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
@@ -361,11 +341,10 @@ def mettre_a_jour_google_sheet(planning, resolution):
         sheet.clear()
         sheet.update([df_export.columns.values.tolist()] + df_export.values.tolist())
 
-        # --- OPTIONS VISUELLES GOOGLE SHEETS ---
-        sheet.freeze(rows=1, cols=1) # Figer les colonnes/lignes
+        sheet.freeze(rows=1, cols=1)
         sheet.format("A1:Z1", {
             "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} # En-tête gris
+            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} 
         })
 
 # ==========================================
@@ -410,15 +389,12 @@ if not est_admin:
             
             # --- MENU DÉROULANT : INTERVALLE DE NUIT ---
             st.markdown("---")
-            st.markdown("#### 🌙 Paramètres de Nuit (Intervalle de sommeil)")
-            st.write("Sélectionnez la plage de 12h dans laquelle l'algorithme doit placer votre vraie nuit de repos.")
-            options_intervalle = [
-                "21:00 - 09:00", "21:30 - 09:30", "22:00 - 10:00", "22:30 - 10:30",
-                "23:00 - 11:00", "23:30 - 11:30", "00:00 - 12:00", "00:30 - 12:30",
-                "01:00 - 13:00", "01:30 - 13:30", "02:00 - 14:00", "02:30 - 14:30",
-                "03:00 - 15:00", "03:30 - 15:30", "04:00 - 16:00", "04:30 - 16:30",
-                "05:00 - 17:00", "05:30 - 17:30", "06:00 - 18:00"
-            ]
+            st.markdown("#### 🌙 Nuit")
+            st.write("Sélectionnez la plage de 12h dans laquelle l'algorithme doit placer votre nuit garantissant un break minimum entre coupure et reprise")
+            
+            # Génération dynamique des 24 possibilités heure par heure
+            options_intervalle = [f"{h:02d}:00 - {(h+12)%24:02d}:00" for h in range(24)]
+            
             intervalle_nuit = st.selectbox("Nuit intervalle (12h)", options_intervalle, index=options_intervalle.index("00:00 - 12:00"))
 
             st.markdown("---")
@@ -608,7 +584,6 @@ if est_admin:
                     try:
                         mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
                         st.success("✅ Le Google Sheet a été mis à jour avec succès ! Les joueurs peuvent rafraîchir leur page.")
-                        # Lien corrigé (propre)
                         st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
                     except Exception as e:
                         st.error(f"Erreur lors de la mise à jour : {e}")
