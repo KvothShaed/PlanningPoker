@@ -302,7 +302,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     return planning_final, temps_hebdo, statut_solveur
 
 # --- NOUVEAU : FONCTION DE LISSAGE ---
-def lisser_planning(planning_brut, donnees_totales):
+def lisser_planning(planning_brut, donnees_totales, resolution):
     if not planning_brut:
         return []
 
@@ -323,9 +323,13 @@ def lisser_planning(planning_brut, donnees_totales):
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
     cles_triees = sorted(grille.keys(), key=lambda x: (ordre_jours.get(x[0], 7), x[1]))
 
+    # NOUVEAU : On stocke l'état complet (planning + jour + heure)
     etat_precedent = {} 
     
     for cle in cles_triees:
+        jour_actuel, heure_actuelle = cle
+        h_obj_actuel = datetime.strptime(heure_actuelle, '%H:%M')
+
         plannings_occupes = list(grille[cle].keys())
         joueurs_presents = list(grille[cle].values())
         
@@ -345,8 +349,15 @@ def lisser_planning(planning_brut, donnees_totales):
                     valide = False
                     break
                     
-                if etat_precedent.get(joueur) == planning_cible:
-                    score += 1 
+                # NOUVEAU : On vérifie la continuité stricte
+                etat_prec = etat_precedent.get(joueur)
+                if etat_prec and etat_prec["planning"] == planning_cible:
+                    # Est-ce que c'était le même jour ?
+                    if etat_prec["jour"] == jour_actuel:
+                        h_prec = datetime.strptime(etat_prec["heure"], '%H:%M')
+                        # Est-ce que c'était le créneau JUSTE avant ?
+                        if h_prec + timedelta(minutes=resolution) == h_obj_actuel:
+                            score += 1 
                     
             if valide and score > meilleur_score:
                 meilleur_score = score
@@ -356,7 +367,12 @@ def lisser_planning(planning_brut, donnees_totales):
             for i, joueur in enumerate(meilleure_dispo):
                 planning_cible = plannings_occupes[i]
                 grille[cle][planning_cible] = joueur
-                etat_precedent[joueur] = planning_cible
+                # Mise à jour de la mémoire avec le timestamp exact
+                etat_precedent[joueur] = {
+                    "planning": planning_cible,
+                    "jour": jour_actuel,
+                    "heure": heure_actuelle
+                }
 
     planning_lisse = []
     for (jour, horaire), affectations in grille.items():
@@ -369,7 +385,6 @@ def lisser_planning(planning_brut, donnees_totales):
             })
             
     return planning_lisse
-
 
 # --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques, resolution, joueur_cible=None):
@@ -660,7 +675,7 @@ if est_admin:
                     )
                     
                     if planning_brut:
-                        planning_complet = lisser_planning(planning_brut, donnees_globales)
+                        planning_complet = lisser_planning(planning_brut, donnees_globales, resolution)
                     else:
                         planning_complet = []
                         
