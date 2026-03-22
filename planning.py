@@ -75,6 +75,19 @@ def sauvegarder_matrice_affinites(data):
     db.collection('config').document('affinites').set(data)
     charger_matrice_affinites.clear()
 
+def publier_planning_officiel(planning_data, resolution):
+    db.collection('plannings').document('officiel').set({
+        "donnees": planning_data,
+        "resolution": resolution
+    })
+
+def charger_planning_officiel():
+    doc = db.collection('plannings').document('officiel').get()
+    if doc.exists:
+        data = doc.to_dict()
+        return data.get("donnees", []), data.get("resolution", 30)
+    return [], 30
+
 # ==========================================
 # CONNEXION GOOGLE SHEETS
 # ==========================================
@@ -207,8 +220,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
     objectif = []
-    objectif.append(100000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
-    objectif.append(-5 * (Max_Temps - Min_Temps)) 
+    objectif.append(1000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
+    objectif.append(-100 * (Max_Temps - Min_Temps)) 
 
     for j in joueurs:
         for c_global in creneaux_globaux:
@@ -225,7 +238,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     if p not in autorises:
                         prob += X[j, p, c_global] == 0, f"Interdit_{j}_{p}_{c_global}"
                     else:
-                        objectif.append(prefs_admin.get(p, 1) * X[j, p, c_global])
+                        objectif.append((prefs_admin.get(p, 1) * 20) * X[j, p, c_global])
             else:
                 prob += Y[j, c_global] == 0, f"Indispo_{j}_{c_global}"
             
@@ -284,7 +297,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     for j in joueurs_assignes:
                         temps_hebdo[j] += resolution
 
-    # NOUVEAU : On récupère le statut exact du solveur
     statut_solveur = pulp.LpStatus[prob.status]
     
     return planning_final, temps_hebdo, statut_solveur
@@ -360,7 +372,7 @@ def lisser_planning(planning_brut, donnees_totales):
 
 
 # --- GÉNÉRATEUR VISUEL ---
-def generer_grille_html(planning, joueurs_uniques, resolution):
+def generer_grille_html(planning, joueurs_uniques, resolution, joueur_cible=None):
     if not planning: return "<p>Aucun planning généré.</p>"
     
     n_joueurs = len(joueurs_uniques)
@@ -397,8 +409,11 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
             for p in ["Planning 250", "Planning 100", "Planning 50"]:
                 slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
                 html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {couleurs_colonnes[p]};'>"
+                
                 if slot and slot["Joueurs_Liste"]:
                     for joueur in slot["Joueurs_Liste"]:
+                        if joueur_cible and joueur != joueur_cible:
+                            continue
                         c = map_couleurs.get(joueur, "#eee")
                         html += f"<div style='background-color: {c}; color: #000; margin: 2px; padding: 4px; border-radius: 6px; font-size: 0.85em; font-weight: 500;'>{joueur}</div>"
                 html += "</td>"
@@ -498,8 +513,31 @@ if not est_admin:
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
 
+        # --- NOUVELLE SECTION : AFFICHAGE DU PLANNING OFFICIEL ---
+        planning_officiel, res_officielle = charger_planning_officiel()
+        
+        if planning_officiel:
+            st.markdown("---")
+            st.subheader("📅 Planning Officiel de la Semaine")
+            
+            is_solo = st.toggle("👀 Mettre en évidence uniquement mes créneaux", value=False)
+            
+            heures_joueur = sum([res_officielle/60 for p in planning_officiel if nom_joueur.strip() in p['Joueurs_Liste']])
+            if is_solo and heures_joueur > 0:
+                st.info(f"💡 Vous avez **{heures_joueur} heures** de jeu prévues au total cette semaine.")
+            
+            tous_les_joueurs_planning = list(set([j for p in planning_officiel for j in p['Joueurs_Liste']]))
+            
+            html_planning = generer_grille_html(
+                planning_officiel, 
+                tous_les_joueurs_planning, 
+                res_officielle, 
+                joueur_cible=nom_joueur.strip() if is_solo else None
+            )
+            st.markdown(html_planning, unsafe_allow_html=True)
+
         st.markdown("---")
-        st.subheader("Vos créneaux enregistrés")
+        st.subheader("Vos disponibilités enregistrées")
         mes_dispos = [d for d in donnees_globales if d["nom"] == nom_joueur.strip()]
         
         if mes_dispos:
@@ -610,43 +648,36 @@ if est_admin:
         st.subheader("Lancer l'Optimisation Mathématique")
         resolution = st.number_input("Résolution (min)", value=30, step=5)
 
-        # 1. LE BOUTON NE GÈRE QUE LE CALCUL ET LA SAUVEGARDE EN MÉMOIRE
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
             if not donnees_globales:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
                 with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
-                    # On récupère bien nos 3 variables maintenant
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
                     )
                     
-                    # Application du lissage post-optimisation
                     if planning_brut:
                         planning_complet = lisser_planning(planning_brut, donnees_globales)
                     else:
                         planning_complet = []
                         
-                    # SAUVEGARDE EN SESSION STATE (Pour résister aux rechargements de page)
                     st.session_state.planning_complet = planning_complet
                     st.session_state.temps_totaux = temps_totaux
                     st.session_state.statut_solveur = statut_solveur
 
-        # 2. L'AFFICHAGE SE FAIT EN DEHORS DU BOUTON
         if 'planning_complet' in st.session_state and st.session_state.planning_complet:
             
-            # --- Indicateur de garantie ---
             st.markdown("---")
             if st.session_state.statut_solveur == 'Optimal':
-                st.success("✅ **Statut Optimal (100%)** : Il est mathématiquement impossible de caser un créneau de plus en respectant vos contraintes.")
+                st.success("✅ **Statut Optimal (Marge de 2%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
             elif st.session_state.statut_solveur == 'Not Solved':
                 st.warning("⏱️ **Temps écoulé (10 min)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
             else:
                 st.error(f"⚠️ Statut inhabituel du solveur : {st.session_state.statut_solveur}")
             
-            # --- Affichage visuel ---
             st.markdown("### 📅 Emploi du temps")
             st.markdown(generer_grille_html(st.session_state.planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
             
@@ -659,11 +690,21 @@ if est_admin:
 
             st.markdown("---")
             st.markdown("### ☁️ Publication en ligne")
-            if st.button("🌐 Mettre à jour le Google Sheet", type="primary"):
-                with st.spinner("Envoi des données..."):
-                    try:
-                        mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
-                        st.success("✅ Le Google Sheet a été mis à jour avec succès !")
-                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
-                    except Exception as e:
-                        st.error(f"Erreur lors de la mise à jour : {e}")
+            
+            col_pub1, col_pub2 = st.columns(2)
+            
+            with col_pub1:
+                if st.button("📢 Partager aux joueurs (Interface)", type="primary"):
+                    with st.spinner("Publication du planning..."):
+                        publier_planning_officiel(st.session_state.planning_complet, resolution)
+                        st.success("✅ Planning partagé avec succès sur l'interface Joueur !")
+                        
+            with col_pub2:
+                if st.button("🌐 Mettre à jour le Google Sheet", type="secondary"):
+                    with st.spinner("Envoi des données..."):
+                        try:
+                            mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
+                            st.success("✅ Le Google Sheet a été mis à jour avec succès !")
+                            st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
+                        except Exception as e:
+                            st.error(f"Erreur lors de la mise à jour : {e}")
