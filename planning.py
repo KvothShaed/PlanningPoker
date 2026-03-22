@@ -672,7 +672,7 @@ if est_admin:
             
             st.markdown("---")
             if st.session_state.statut_solveur == 'Optimal':
-                st.success("✅ **Statut Optimal (Marge de 2%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
+                st.success("✅ **Statut Optimal (Marge de 0.5%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
             elif st.session_state.statut_solveur == 'Not Solved':
                 st.warning("⏱️ **Temps écoulé (10 min)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
             else:
