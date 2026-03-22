@@ -174,14 +174,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-        # NOUVELLE RÈGLE : Fenêtre glissante de 24h
+        # RÈGLE : Fenêtre glissante de 24h
         max_h_24h = d_joueur.get("heures_max_jour", 6)
         max_slots_24h = int((max_h_24h * 60) / resolution)
         
         for i in range(len(creneaux_globaux)):
-            # On regarde les slots de 'i' jusqu'à 'i + 24h' (ou la fin de la semaine si on déborde)
             fenetre = min(slots_dans_24h, len(creneaux_globaux) - i)
-            # Inutile de créer une contrainte si la fenêtre restante est plus courte que le max autorisé
             if fenetre > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
@@ -209,6 +207,26 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-10 * (Max_Temps - Min_Temps)) 
 
+    # ==========================================
+    # RÈGLE DE CONTINUITÉ (ÉVITER LE SWITCH DE LIMITE)
+    # ==========================================
+    Z_cont = pulp.LpVariable.dicts("Continuite", 
+                                   ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(len(creneaux_globaux)-1)), 
+                                   cat='Binary')
+    
+    bonus_continuite = 50 
+
+    for j in joueurs:
+        for p in PLANNINGS_DISPOS:
+            for i in range(len(creneaux_globaux) - 1):
+                c1 = creneaux_globaux[i]
+                c2 = creneaux_globaux[i+1]
+                
+                if c1.split("_")[0] == c2.split("_")[0]:
+                    prob += Z_cont[j, p, i] <= X[j, p, c1], f"Lien_Cont1_{j}_{p}_{i}"
+                    prob += Z_cont[j, p, i] <= X[j, p, c2], f"Lien_Cont2_{j}_{p}_{i}"
+                    objectif.append(bonus_continuite * Z_cont[j, p, i])
+
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
@@ -230,7 +248,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             
     prob += pulp.lpSum(objectif)
 
-    # NOUVELLE CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
+    # CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= 1, f"Cap_{p}_{c}"
