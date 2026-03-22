@@ -277,7 +277,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.02))
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.005))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -653,7 +653,7 @@ if est_admin:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
+                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 0.5%)..."):
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
