@@ -28,7 +28,7 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # ==========================================
-# GESTION DES DONNÉES (CLOUD FIRESTORE) AVEC CACHE
+# GESTION DES DONNÉES (CLOUD FIRESTORE)
 # ==========================================
 @st.cache_data(ttl=60)
 def charger_donnees():
@@ -46,9 +46,16 @@ def supprimer_entree(id_entree):
 def vider_toutes_les_dispos():
     docs = db.collection('dispos').stream()
     batch = db.batch()
+    count = 0
+    # FIX: Sécurité pour la limite des 500 opérations par batch sur Firestore
     for doc in docs:
         batch.delete(doc.reference)
-    batch.commit()
+        count += 1
+        if count % 500 == 0:
+            batch.commit()
+            batch = db.batch()
+    if count % 500 != 0:
+        batch.commit()
     charger_donnees.clear()
 
 @st.cache_data(ttl=300)
@@ -69,7 +76,7 @@ def sauvegarder_matrice_affinites(data):
     charger_matrice_affinites.clear()
 
 # ==========================================
-# CONNEXION GOOGLE SHEETS EN CACHE
+# CONNEXION GOOGLE SHEETS
 # ==========================================
 @st.cache_resource
 def get_gspread_client():
@@ -97,13 +104,8 @@ def mettre_a_jour_google_sheet(planning, resolution):
         jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
         plannings = ["250", "100", "50"]
         
-        colonnes_triees = []
-        for j in jours:
-            for p in plannings:
-                nom_col = f"{j} | {p}"
-                if nom_col in df_pivot.columns:
-                    colonnes_triees.append(nom_col)
-                    
+        colonnes_triees = [f"{j} | {p}" for j in jours for p in plannings if f"{j} | {p}" in df_pivot.columns]
+        
         df_pivot = df_pivot[colonnes_triees]
         df_export = df_pivot.reset_index()
 
@@ -122,7 +124,7 @@ def mettre_a_jour_google_sheet(planning, resolution):
             "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9} 
         })
 
-# --- MOTEUR D'OPTIMISATION MATHÉMATIQUE HEBDOMADAIRE (PuLP) ---
+# --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
 def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, assignations_forcees, matrice_affinites):
     if not donnees_totales:
         return [], {}
@@ -131,9 +133,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     dict_dispos_jour = {}
     for d in donnees_totales:
         cle = f"{d['nom']}_{d['jour']}"
-        if cle not in dict_dispos_jour:
-            dict_dispos_jour[cle] = []
-        dict_dispos_jour[cle].append(d)
+        dict_dispos_jour.setdefault(cle, []).append(d)
 
     prob = pulp.LpProblem("Optimisation_Hebdomadaire", pulp.LpMaximize)
     
@@ -147,7 +147,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             creneaux_globaux.append(f"{jour}_{actuel.strftime('%H:%M')}")
             actuel += timedelta(minutes=resolution)
 
-    joueurs = list(set([d["nom"] for d in donnees_totales]))
+    joueurs = list(dict_joueurs.keys())
     
     # VARIABLES
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
@@ -163,10 +163,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
-    creneaux_par_jour = {jour: [] for jour in jours_semaine}
-    for c in creneaux_globaux:
-        jour_str = c.split("_")[0]
-        creneaux_par_jour[jour_str].append(c)
+    creneaux_par_jour = {jour: [c for c in creneaux_globaux if c.startswith(jour)] for jour in jours_semaine}
         
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
@@ -174,19 +171,17 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
         d_joueur = dict_joueurs.get(j)
-        if d_joueur:
-            max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
-            prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
+        max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
+        prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-            max_h_jour = d_joueur.get("heures_max_jour", 6)
-            max_slots_jour = int((max_h_jour * 60) / resolution)
-            for jour, creneaux_j in creneaux_par_jour.items():
-                prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
+        max_h_jour = d_joueur.get("heures_max_jour", 6)
+        max_slots_jour = int((max_h_jour * 60) / resolution)
+        for jour, creneaux_j in creneaux_par_jour.items():
+            prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
     # ==========================================
     # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE
     # ==========================================
-    
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
     
@@ -195,14 +190,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     
     for j in joueurs:
         for i in range(len(creneaux_globaux)):
-            # On boucle sur toutes les longueurs de "zones interdites" possibles
             for k in range(slots_pause_max + 1, slots_nuit_min + 1):
                 if i + k < len(creneaux_globaux):
-                    # Règle : Si on joue en 'i' ET qu'on re-joue en 'i+k' (soit entre 6h et 10h plus tard),
-                    # IL FAUT avoir joué au moins 1 créneau entre les deux.
                     prob += Y[j, creneaux_globaux[i]] + Y[j, creneaux_globaux[i+k]] <= 1 + pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(1, k)), f"NoMidBreak_{j}_{i}_{k}"
-
-    # ==========================================
 
     for c in creneaux_globaux:
         for j in joueurs:
@@ -210,17 +200,16 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
     objectif = []
-    
-    # Objectifs de base
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
-    objectif.append(-100 * (Max_Temps - Min_Temps))
+    # FIX: J'ai drastiquement réduit le poids de l'équité pour éviter qu'elle ne détruise la génération globale
+    objectif.append(-10 * (Max_Temps - Min_Temps)) 
 
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
+            dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
             
-            cle_recherche = f"{j}_{jour}"
-            dispos_j = dict_dispos_jour.get(cle_recherche, [])
+            # FIX: Prise en compte plus propre de la conversion en datetime pour éviter les bugs "24:00"
             d_jour = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
             
             if d_jour:
@@ -232,8 +221,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                     if p not in autorises:
                         prob += X[j, p, c_global] == 0, f"Interdit_{j}_{p}_{c_global}"
                     else:
-                        valeur_pref = prefs_admin.get(p, 1)
-                        objectif.append(valeur_pref * X[j, p, c_global])
+                        objectif.append(prefs_admin.get(p, 1) * X[j, p, c_global])
             else:
                 prob += Y[j, c_global] == 0, f"Indispo_{j}_{c_global}"
             
@@ -245,8 +233,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     for j in joueurs:
         d_joueur = dict_joueurs.get(j)
-        if not d_joueur: continue
-            
         max_slots = int(d_joueur["t_max_affile"] / resolution)
         min_slots = int(d_joueur["t_min_base"] / resolution)
         break_slots = int(d_joueur.get("break_min_heavy", 30) / resolution) 
@@ -271,15 +257,14 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     for force in assignations_forcees:
         c_cible = f"{force['jour']}_{force['heure']}"
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
-            p_force = force['planning']
-            prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
+            prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.02))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
     
-    if pulp.LpStatus[prob.status] == 'Optimal' or pulp.LpStatus[prob.status] == 'Not Solved':
+    if pulp.LpStatus[prob.status] in ['Optimal', 'Not Solved']:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             for p in PLANNINGS_DISPOS:
@@ -320,24 +305,20 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
         html += f"<th colspan='3' style='border: 1px solid #ddd; padding: 10px; background-color: #f4f4f4;'>{j}</th>"
     html += "</tr><tr>"
     for j in jours:
-        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 250']};'>250</th>"
-        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 100']};'>100</th>"
-        html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes['Planning 50']};'>50</th>"
+        for p in ["Planning 250", "Planning 100", "Planning 50"]:
+            html += f"<th style='border: 1px solid #ddd; padding: 5px; background-color: {couleurs_colonnes[p]};'>{p.split(' ')[1]}</th>"
     html += "</tr>"
     
     for h_str in horaires_str:
         h_obj = datetime.strptime(h_str, '%H:%M')
-        h_fin_str = (h_obj + timedelta(minutes=resolution)).strftime('%H:%M')
-        plage_horaire = f"{h_str} - {h_fin_str}"
+        plage_horaire = f"{h_str} - {(h_obj + timedelta(minutes=resolution)).strftime('%H:%M')}"
         
         html += f"<tr><td style='border: 1px solid #ddd; padding: 8px; font-weight: bold; white-space: nowrap; background-color: #fafafa;'>{plage_horaire}</td>"
         
         for j in jours:
             for p in ["Planning 250", "Planning 100", "Planning 50"]:
                 slot = next((item for item in planning if item["Jour"] == j and item["Horaire"] == h_str and item["Planning"] == p), None)
-                bg_color = couleurs_colonnes[p]
-                
-                html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {bg_color};'>"
+                html += f"<td style='border: 1px solid #ddd; padding: 4px; background-color: {couleurs_colonnes[p]};'>"
                 if slot and slot["Joueurs_Liste"]:
                     for joueur in slot["Joueurs_Liste"]:
                         c = map_couleurs.get(joueur, "#eee")
@@ -384,8 +365,7 @@ if not est_admin:
             with c2: 
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
-            break_max_cond = 30
-            creneau_min_adj = 30
+            # FIX: Suppression de break_max_cond et creneau_min_adj qui ne servaient à rien mathématiquement
             
             st.markdown("---")
             st.subheader("Ajouter une disponibilité")
@@ -414,8 +394,7 @@ if not est_admin:
                         "debut": debut_str, "fin": fin_str,
                         "limite_max": limite_max,
                         "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
-                        "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
-                        "t_min_adj": creneau_min_adj,
+                        "break_min_heavy": break_min_heavy,
                         "heures_max_hebdo": heures_max_hebdo,
                         "heures_max_jour": heures_max_jour
                     }
@@ -436,8 +415,11 @@ if not est_admin:
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
-                        if "intervalle_nuit" in d:
-                            del d["intervalle_nuit"] 
+                        
+                        # FIX: Nettoyage des vieilles variables fantômes si elles existent
+                        for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
+                            if old_key in d: del d[old_key]
+                            
                         ajouter_dispo(d)
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
@@ -479,9 +461,10 @@ if est_admin:
     with tab_liste:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
-            if "intervalle_nuit" in df.columns:
-                df = df.drop(columns=["intervalle_nuit"])
-            st.dataframe(df.drop(columns=["id"]), use_container_width=True)
+            # FIX: Nettoyage dynamique des colonnes inutiles pour l'affichage
+            colonnes_a_ignorer = ["id", "intervalle_nuit", "break_max_cond", "t_min_adj"]
+            cols_to_drop = [c for c in colonnes_a_ignorer if c in df.columns]
+            st.dataframe(df.drop(columns=cols_to_drop), use_container_width=True)
             
             options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees_globales}
             creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
@@ -561,7 +544,7 @@ if est_admin:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 5%)..."):
+                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
                         donnees_globales, resolution, joueurs_simultanes, 
                         st.session_state.assignations_forcees, matrice
@@ -569,7 +552,7 @@ if est_admin:
                     st.session_state.planning_complet = planning_complet
                 
                 if not planning_complet:
-                    st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes et les disponibilités.")
+                    st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes (elles sont probablement trop strictes).")
                 else:
                     st.success("Planning optimal trouvé !")
                     st.markdown("### 📅 Emploi du temps")
