@@ -264,7 +264,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.02))
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.00))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
