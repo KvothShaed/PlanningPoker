@@ -659,19 +659,7 @@ if est_admin:
 
             st.markdown("---")
             st.markdown("### ☁️ Publication en ligne")
-            if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
-                with st.spinner("Envoi des données..."):
-                    try:
-                        mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
-                        st.success("✅ Le Google Sheet a été mis à jour avec succès !")
-                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
-                    except Exception as e:
-                        st.error(f"Erreur lors de la mise à jour : {e}")
-
-        if 'planning_complet' in st.session_state and st.session_state.planning_complet:
-            st.markdown("---")
-            st.markdown("### ☁️ Publication en ligne")
-            if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
+            if st.button("🌐 Mettre à jour le Google Sheet", type="primary"):
                 with st.spinner("Envoi des données..."):
                     try:
                         mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
