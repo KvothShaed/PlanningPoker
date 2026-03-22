@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import colorsys
 import gspread
 from google.oauth2.service_account import Credentials
+import itertools
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -285,6 +286,76 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
 
     return planning_final, temps_hebdo
 
+# --- NOUVEAU : FONCTION DE LISSAGE ---
+def lisser_planning(planning_brut, donnees_totales):
+    if not planning_brut:
+        return []
+
+    plannings_autorises = {
+        "250": ["Planning 250", "Planning 100", "Planning 50"],
+        "100": ["Planning 100", "Planning 50"],
+        "50":  ["Planning 50"]
+    }
+    joueur_limite = {d["nom"]: str(d.get("limite_max", 250)) for d in donnees_totales}
+
+    grille = {}
+    for ligne in planning_brut:
+        cle = (ligne["Jour"], ligne["Horaire"])
+        if cle not in grille:
+            grille[cle] = {}
+        grille[cle][ligne["Planning"]] = ligne["Joueurs_Liste"][0]
+
+    ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
+    cles_triees = sorted(grille.keys(), key=lambda x: (ordre_jours.get(x[0], 7), x[1]))
+
+    etat_precedent = {} 
+    
+    for cle in cles_triees:
+        plannings_occupes = list(grille[cle].keys())
+        joueurs_presents = list(grille[cle].values())
+        
+        meilleur_score = -1
+        meilleure_dispo = None
+        
+        for permutation in itertools.permutations(joueurs_presents):
+            valide = True
+            score = 0
+            
+            for i, joueur in enumerate(permutation):
+                planning_cible = plannings_occupes[i]
+                limite_j = joueur_limite.get(joueur, "250")
+                autorises_j = plannings_autorises.get(limite_j, ["Planning 250", "Planning 100", "Planning 50"])
+                
+                if planning_cible not in autorises_j:
+                    valide = False
+                    break
+                    
+                if etat_precedent.get(joueur) == planning_cible:
+                    score += 1 
+                    
+            if valide and score > meilleur_score:
+                meilleur_score = score
+                meilleure_dispo = permutation
+        
+        if meilleure_dispo:
+            for i, joueur in enumerate(meilleure_dispo):
+                planning_cible = plannings_occupes[i]
+                grille[cle][planning_cible] = joueur
+                etat_precedent[joueur] = planning_cible
+
+    planning_lisse = []
+    for (jour, horaire), affectations in grille.items():
+        for planning, joueur in affectations.items():
+            planning_lisse.append({
+                "Jour": jour,
+                "Horaire": horaire,
+                "Planning": planning,
+                "Joueurs_Liste": [joueur]
+            })
+            
+    return planning_lisse
+
+
 # --- GÉNÉRATEUR VISUEL ---
 def generer_grille_html(planning, joueurs_uniques, resolution):
     if not planning: return "<p>Aucun planning généré.</p>"
@@ -542,16 +613,23 @@ if est_admin:
             else:
                 matrice = charger_matrice_affinites()
                 with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
-                    planning_complet, temps_totaux = optimiser_planning_hebdo(
+                    planning_brut, temps_totaux = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
                     )
+                    
+                    # Application du lissage post-optimisation
+                    if planning_brut:
+                        planning_complet = lisser_planning(planning_brut, donnees_globales)
+                    else:
+                        planning_complet = []
+                        
                     st.session_state.planning_complet = planning_complet
                 
                 if not planning_complet:
                     st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes (elles sont probablement trop strictes).")
                 else:
-                    st.success("Planning optimal trouvé !")
+                    st.success("Planning optimal trouvé et lissé !")
                     st.markdown("### 📅 Emploi du temps")
                     st.markdown(generer_grille_html(planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
                     
