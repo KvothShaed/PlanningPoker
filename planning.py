@@ -47,7 +47,6 @@ def vider_toutes_les_dispos():
     docs = db.collection('dispos').stream()
     batch = db.batch()
     count = 0
-    # FIX: Sécurité pour la limite des 500 opérations par batch sur Firestore
     for doc in docs:
         batch.delete(doc.reference)
         count += 1
@@ -125,7 +124,7 @@ def mettre_a_jour_google_sheet(planning, resolution):
         })
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
-def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, assignations_forcees, matrice_affinites):
+def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, matrice_affinites):
     if not donnees_totales:
         return [], {}
 
@@ -163,7 +162,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         "50":  ["Planning 50"]
     }
 
-    creneaux_par_jour = {jour: [c for c in creneaux_globaux if c.startswith(jour)] for jour in jours_semaine}
+    # Constantes pour la fenêtre glissante
+    slots_dans_24h = int((24 * 60) / resolution)
         
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
@@ -174,13 +174,19 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-        max_h_jour = d_joueur.get("heures_max_jour", 6)
-        max_slots_jour = int((max_h_jour * 60) / resolution)
-        for jour, creneaux_j in creneaux_par_jour.items():
-            prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
+        # NOUVELLE RÈGLE : Fenêtre glissante de 24h
+        max_h_24h = d_joueur.get("heures_max_jour", 6)
+        max_slots_24h = int((max_h_24h * 60) / resolution)
+        
+        for i in range(len(creneaux_globaux)):
+            # On regarde les slots de 'i' jusqu'à 'i + 24h' (ou la fin de la semaine si on déborde)
+            fenetre = min(slots_dans_24h, len(creneaux_globaux) - i)
+            # Inutile de créer une contrainte si la fenêtre restante est plus courte que le max autorisé
+            if fenetre > max_slots_24h:
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
     # ==========================================
-    # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE
+    # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE (AVEC RESET)
     # ==========================================
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
@@ -201,15 +207,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     objectif = []
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
-    # FIX: J'ai drastiquement réduit le poids de l'équité pour éviter qu'elle ne détruise la génération globale
     objectif.append(-10 * (Max_Temps - Min_Temps)) 
 
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
-            
-            # FIX: Prise en compte plus propre de la conversion en datetime pour éviter les bugs "24:00"
             d_jour = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
             
             if d_jour:
@@ -227,9 +230,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             
     prob += pulp.lpSum(objectif)
 
+    # NOUVELLE CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
-            prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= joueurs_simultanes, f"Cap_{p}_{c}"
+            prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= 1, f"Cap_{p}_{c}"
 
     for j in joueurs:
         d_joueur = dict_joueurs.get(j)
@@ -356,7 +360,7 @@ if not est_admin:
             st.markdown("#### ⚙️ Contraintes de rythme")
             c_h, c_j = st.columns(2)
             with c_h: heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
-            with c_j: heures_max_jour = st.number_input("Maximum d'heures / JOUR", value=6, step=1)
+            with c_j: heures_max_jour = st.number_input("Maximum d'heures / 24H (Glissant)", value=6, step=1)
             
             c1, c2 = st.columns(2)
             with c1:
@@ -365,8 +369,6 @@ if not est_admin:
             with c2: 
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
-            # FIX: Suppression de break_max_cond et creneau_min_adj qui ne servaient à rien mathématiquement
-            
             st.markdown("---")
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
@@ -415,8 +417,6 @@ if not est_admin:
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
-                        
-                        # FIX: Nettoyage des vieilles variables fantômes si elles existent
                         for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
                             if old_key in d: del d[old_key]
                             
@@ -461,7 +461,6 @@ if est_admin:
     with tab_liste:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
-            # FIX: Nettoyage dynamique des colonnes inutiles pour l'affichage
             colonnes_a_ignorer = ["id", "intervalle_nuit", "break_max_cond", "t_min_adj"]
             cols_to_drop = [c for c in colonnes_a_ignorer if c in df.columns]
             st.dataframe(df.drop(columns=cols_to_drop), use_container_width=True)
@@ -535,9 +534,7 @@ if est_admin:
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
-        c1, c2 = st.columns(2)
-        with c1: resolution = st.number_input("Résolution (min)", value=30, step=5)
-        with c2: joueurs_simultanes = st.number_input("Joueurs max par planning", value=1, min_value=1)
+        resolution = st.number_input("Résolution (min)", value=30, step=5)
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
             if not donnees_globales:
@@ -546,7 +543,7 @@ if est_admin:
                 matrice = charger_matrice_affinites()
                 with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
-                        donnees_globales, resolution, joueurs_simultanes, 
+                        donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
                     )
                     st.session_state.planning_complet = planning_complet
