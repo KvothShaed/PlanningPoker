@@ -152,9 +152,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     # VARIABLES
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
-    
-    # NOUVELLE VARIABLE : Bonus Radar
-    BonusRadar = pulp.LpVariable.dicts("BonusRadar", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
 
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
@@ -187,10 +184,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
     # ==========================================
-    # LES NOUVELLES RÈGLES DE RYTHME
+    # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE
     # ==========================================
     
-    # 1. BÂTON : Interdiction des pauses moyennes (Zone morte)
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
     
@@ -198,25 +194,13 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     slots_nuit_min = int(h_nuit_min * 60 / resolution)
     
     for j in joueurs:
-        for i in range(len(creneaux_globaux) - slots_nuit_min):
-            # Si le joueur joue en i et s'arrête en i+1, alors interdiction de reprendre pendant la zone morte
-            for k in range(slots_pause_max + 1, slots_nuit_min):
-                prob += Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i+1]] + Y[j, creneaux_globaux[i+k]] <= 1, f"NoMidBreak_{j}_{i}_{k}"
-
-    # 2. CAROTTE : Le Radar de Proximité (Aimantation des sessions)
-    radar_slots = int(3 * 60 / resolution) # Le radar regarde 3 heures en avant
-    
-    for j in joueurs:
         for i in range(len(creneaux_globaux)):
-            # Le bonus ne peut s'activer que si on est en train de jouer
-            prob += BonusRadar[j, creneaux_globaux[i]] <= Y[j, creneaux_globaux[i]], f"RadarActive_{j}_{i}"
-            
-            limite_radar = min(i + radar_slots + 1, len(creneaux_globaux))
-            if limite_radar > i + 1:
-                # Le bonus nécessite qu'au moins 1 créneau soit joué dans la zone du radar
-                prob += BonusRadar[j, creneaux_globaux[i]] <= pulp.lpSum(Y[j, creneaux_globaux[k]] for k in range(i+1, limite_radar)), f"RadarDetect_{j}_{i}"
-            else:
-                prob += BonusRadar[j, creneaux_globaux[i]] == 0
+            # On boucle sur toutes les longueurs de "zones interdites" possibles
+            for k in range(slots_pause_max + 1, slots_nuit_min + 1):
+                if i + k < len(creneaux_globaux):
+                    # Règle : Si on joue en 'i' ET qu'on re-joue en 'i+k' (soit entre 6h et 10h plus tard),
+                    # IL FAUT avoir joué au moins 1 créneau entre les deux.
+                    prob += Y[j, creneaux_globaux[i]] + Y[j, creneaux_globaux[i+k]] <= 1 + pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(1, k)), f"NoMidBreak_{j}_{i}_{k}"
 
     # ==========================================
 
@@ -230,9 +214,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     # Objectifs de base
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
-    
-    # Ajout du Bonus Radar à la fonction objectif (500 points par créneau bien entouré)
-    objectif.append(500 * pulp.lpSum(BonusRadar[j, c] for j in joueurs for c in creneaux_globaux))
 
     for j in joueurs:
         for c_global in creneaux_globaux:
@@ -293,7 +274,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # OPTIMISATION MAJEURE : gapRel à 5%
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60, gapRel=0.05))
     
     planning_final = []
@@ -457,7 +437,7 @@ if not est_admin:
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
                         if "intervalle_nuit" in d:
-                            del d["intervalle_nuit"] # Nettoyage de l'ancienne variable
+                            del d["intervalle_nuit"] 
                         ajouter_dispo(d)
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
