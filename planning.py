@@ -284,7 +284,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     for j in joueurs_assignes:
                         temps_hebdo[j] += resolution
 
-    return planning_final, temps_hebdo
+    # NOUVEAU : On récupère le statut exact du solveur
+    statut_solveur = pulp.LpStatus[prob.status]
+    
+    return planning_final, temps_hebdo, statut_solveur
 
 # --- NOUVEAU : FONCTION DE LISSAGE ---
 def lisser_planning(planning_brut, donnees_totales):
@@ -607,13 +610,15 @@ if est_admin:
         st.subheader("Lancer l'Optimisation Mathématique")
         resolution = st.number_input("Résolution (min)", value=30, step=5)
 
+        # 1. LE BOUTON NE GÈRE QUE LE CALCUL ET LA SAUVEGARDE EN MÉMOIRE
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
             if not donnees_globales:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
                 with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
-                    planning_brut, temps_totaux = optimiser_planning_hebdo(
+                    # On récupère bien nos 3 variables maintenant
+                    planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
                     )
@@ -624,21 +629,44 @@ if est_admin:
                     else:
                         planning_complet = []
                         
+                    # SAUVEGARDE EN SESSION STATE (Pour résister aux rechargements de page)
                     st.session_state.planning_complet = planning_complet
-                
-                if not planning_complet:
-                    st.warning("Aucun créneau n'a pu être généré. Vérifiez les contraintes (elles sont probablement trop strictes).")
-                else:
-                    st.success("Planning optimal trouvé et lissé !")
-                    st.markdown("### 📅 Emploi du temps")
-                    st.markdown(generer_grille_html(planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
-                    
-                    st.markdown("### 📊 Temps de jeu total (Hebdomadaire)")
-                    stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in temps_totaux.items() if t > 0]
-                    if stats_data:
-                        df_stats = pd.DataFrame(stats_data)
-                        barres = alt.Chart(df_stats).mark_bar().encode(x=alt.X('Joueur:O', sort='-y'), y='Temps (Heures):Q')
-                        st.altair_chart(barres, use_container_width=True)
+                    st.session_state.temps_totaux = temps_totaux
+                    st.session_state.statut_solveur = statut_solveur
+
+        # 2. L'AFFICHAGE SE FAIT EN DEHORS DU BOUTON
+        if 'planning_complet' in st.session_state and st.session_state.planning_complet:
+            
+            # --- Indicateur de garantie ---
+            st.markdown("---")
+            if st.session_state.statut_solveur == 'Optimal':
+                st.success("✅ **Statut Optimal (100%)** : Il est mathématiquement impossible de caser un créneau de plus en respectant vos contraintes.")
+            elif st.session_state.statut_solveur == 'Not Solved':
+                st.warning("⏱️ **Temps écoulé (10 min)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
+            else:
+                st.error(f"⚠️ Statut inhabituel du solveur : {st.session_state.statut_solveur}")
+            
+            # --- Affichage visuel ---
+            st.markdown("### 📅 Emploi du temps")
+            st.markdown(generer_grille_html(st.session_state.planning_complet, noms_dispos, resolution), unsafe_allow_html=True)
+            
+            st.markdown("### 📊 Temps de jeu total (Hebdomadaire)")
+            stats_data = [{"Joueur": j, "Temps (Heures)": t/60.0} for j, t in st.session_state.temps_totaux.items() if t > 0]
+            if stats_data:
+                df_stats = pd.DataFrame(stats_data)
+                barres = alt.Chart(df_stats).mark_bar().encode(x=alt.X('Joueur:O', sort='-y'), y='Temps (Heures):Q')
+                st.altair_chart(barres, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("### ☁️ Publication en ligne")
+            if st.button("🌐 Mettre à jour le Google Sheet en direct", type="primary"):
+                with st.spinner("Envoi des données..."):
+                    try:
+                        mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
+                        st.success("✅ Le Google Sheet a été mis à jour avec succès !")
+                        st.markdown("[Lien vers le Google Sheet public](https://docs.google.com/spreadsheets/d/1wl_RLPs1h7TsUQFDQj6An0ouhU1-KlXEmBURksGDPic/edit)")
+                    except Exception as e:
+                        st.error(f"Erreur lors de la mise à jour : {e}")
 
         if 'planning_complet' in st.session_state and st.session_state.planning_complet:
             st.markdown("---")
