@@ -161,6 +161,9 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         "100": ["Planning 100", "Planning 50"],
         "50":  ["Planning 50"]
     }
+
+    # Constantes pour la fenêtre glissante
+    slots_dans_24h = int((24 * 60) / resolution)
         
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
@@ -170,6 +173,17 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         d_joueur = dict_joueurs.get(j)
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
+            
+        # NOUVELLE RÈGLE : Fenêtre glissante de 24h
+        max_h_24h = d_joueur.get("heures_max_jour", 6)
+        max_slots_24h = int((max_h_24h * 60) / resolution)
+        
+        for i in range(len(creneaux_globaux)):
+            # On regarde les slots de 'i' jusqu'à 'i + 24h' (ou la fin de la semaine si on déborde)
+            fenetre = min(slots_dans_24h, len(creneaux_globaux) - i)
+            # Inutile de créer une contrainte si la fenêtre restante est plus courte que le max autorisé
+            if fenetre > max_slots_24h:
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
     # ==========================================
     # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE (AVEC RESET)
@@ -195,26 +209,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-10 * (Max_Temps - Min_Temps)) 
 
-    # ==========================================
-    # RÈGLE DE CONTINUITÉ (ÉVITER LE SWITCH DE LIMITE)
-    # ==========================================
-    Z_cont = pulp.LpVariable.dicts("Continuite", 
-                                   ((j, p, i) for j in joueurs for p in PLANNINGS_DISPOS for i in range(len(creneaux_globaux)-1)), 
-                                   cat='Binary')
-    
-    bonus_continuite = 50 
-
-    for j in joueurs:
-        for p in PLANNINGS_DISPOS:
-            for i in range(len(creneaux_globaux) - 1):
-                c1 = creneaux_globaux[i]
-                c2 = creneaux_globaux[i+1]
-                
-                if c1.split("_")[0] == c2.split("_")[0]:
-                    prob += Z_cont[j, p, i] <= X[j, p, c1], f"Lien_Cont1_{j}_{p}_{i}"
-                    prob += Z_cont[j, p, i] <= X[j, p, c2], f"Lien_Cont2_{j}_{p}_{i}"
-                    objectif.append(bonus_continuite * Z_cont[j, p, i])
-
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
@@ -236,7 +230,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             
     prob += pulp.lpSum(objectif)
 
-    # CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
+    # NOUVELLE CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= 1, f"Cap_{p}_{c}"
@@ -269,8 +263,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # REPASSÉ À 0.05 POUR ÉVITER LE TIMEOUT
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.05))
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.02))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -365,7 +358,9 @@ if not est_admin:
             limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
             
             st.markdown("#### ⚙️ Contraintes de rythme")
-            heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
+            c_h, c_j = st.columns(2)
+            with c_h: heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
+            with c_j: heures_max_jour = st.number_input("Maximum d'heures / 24H (Glissant)", value=6, step=1)
             
             c1, c2 = st.columns(2)
             with c1:
@@ -402,7 +397,8 @@ if not est_admin:
                         "limite_max": limite_max,
                         "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                         "break_min_heavy": break_min_heavy,
-                        "heures_max_hebdo": heures_max_hebdo
+                        "heures_max_hebdo": heures_max_hebdo,
+                        "heures_max_jour": heures_max_jour
                     }
                     ajouter_dispo(nouvelle_dispo)
                 st.success("Créneaux ajoutés avec succès !")
@@ -417,10 +413,11 @@ if not est_admin:
                     for d in creneaux_joueur:
                         d["limite_max"] = limite_max
                         d["heures_max_hebdo"] = heures_max_hebdo
+                        d["heures_max_jour"] = heures_max_jour
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
-                        for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit", "heures_max_jour"]:
+                        for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
                             if old_key in d: del d[old_key]
                             
                         ajouter_dispo(d)
@@ -464,7 +461,7 @@ if est_admin:
     with tab_liste:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
-            colonnes_a_ignorer = ["id", "intervalle_nuit", "break_max_cond", "t_min_adj", "heures_max_jour"]
+            colonnes_a_ignorer = ["id", "intervalle_nuit", "break_max_cond", "t_min_adj"]
             cols_to_drop = [c for c in colonnes_a_ignorer if c in df.columns]
             st.dataframe(df.drop(columns=cols_to_drop), use_container_width=True)
             
@@ -544,7 +541,7 @@ if est_admin:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 5%)..."):
+                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 2%)..."):
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
                         st.session_state.assignations_forcees, matrice
