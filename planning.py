@@ -37,7 +37,7 @@ def charger_donnees():
 
 def ajouter_dispo(dispo_data):
     db.collection('dispos').document(dispo_data["id"]).set(dispo_data)
-    charger_donnees.clear() # Vider le cache après écriture
+    charger_donnees.clear()
 
 def supprimer_entree(id_entree):
     db.collection('dispos').document(id_entree).delete()
@@ -45,7 +45,7 @@ def supprimer_entree(id_entree):
 
 def vider_toutes_les_dispos():
     docs = db.collection('dispos').stream()
-    batch = db.batch() # Optimisation : Batch Write
+    batch = db.batch()
     for doc in docs:
         batch.delete(doc.reference)
     batch.commit()
@@ -60,6 +60,7 @@ def charger_matrice_affinites():
         "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
         "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
         "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
+        "pause_interdite_min": 6,
         "repos_nuit_min": 10
     }
 
@@ -126,7 +127,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
     if not donnees_totales:
         return [], {}
 
-    # --- OPTIMISATION : PRÉ-CALCUL DES DICTIONNAIRES (Complexité O(1)) ---
     dict_joueurs = {d["nom"]: d for d in donnees_totales}
     dict_dispos_jour = {}
     for d in donnees_totales:
@@ -149,9 +149,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
 
     joueurs = list(set([d["nom"] for d in donnees_totales]))
     
+    # VARIABLES
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
-    SleepStart = pulp.LpVariable.dicts("SleepStart", ((j, d, c) for j in joueurs for d in jours_semaine for c in creneaux_globaux), cat='Binary')
+    
+    # NOUVELLE VARIABLE : Bonus Radar
+    BonusRadar = pulp.LpVariable.dicts("BonusRadar", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
 
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
@@ -168,15 +171,11 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
         jour_str = c.split("_")[0]
         creneaux_par_jour[jour_str].append(c)
         
-    heures_nuit = matrice_affinites.get("repos_nuit_min", 10)
-    slots_nuit_standard = int((heures_nuit * 60) / resolution)
-
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
-        # OPTIMISATION ICI
         d_joueur = dict_joueurs.get(j)
         if d_joueur:
             max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
@@ -187,35 +186,39 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             for jour, creneaux_j in creneaux_par_jour.items():
                 prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= max_slots_jour, f"Max_Jour_{j}_{jour}"
 
-            intervalle = d_joueur.get("intervalle_nuit", "00:00 - 05:00")
-            couche_min = intervalle.split(" - ")[0]
+    # ==========================================
+    # LES NOUVELLES RÈGLES DE RYTHME
+    # ==========================================
+    
+    # 1. BÂTON : Interdiction des pauses moyennes (Zone morte)
+    h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
+    h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
+    
+    slots_pause_max = int(h_pause_max * 60 / resolution)
+    slots_nuit_min = int(h_nuit_min * 60 / resolution)
+    
+    for j in joueurs:
+        for i in range(len(creneaux_globaux) - slots_nuit_min):
+            # Si le joueur joue en i et s'arrête en i+1, alors interdiction de reprendre pendant la zone morte
+            for k in range(slots_pause_max + 1, slots_nuit_min):
+                prob += Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i+1]] + Y[j, creneaux_globaux[i+k]] <= 1, f"NoMidBreak_{j}_{i}_{k}"
+
+    # 2. CAROTTE : Le Radar de Proximité (Aimantation des sessions)
+    radar_slots = int(3 * 60 / resolution) # Le radar regarde 3 heures en avant
+    
+    for j in joueurs:
+        for i in range(len(creneaux_globaux)):
+            # Le bonus ne peut s'activer que si on est en train de jouer
+            prob += BonusRadar[j, creneaux_globaux[i]] <= Y[j, creneaux_globaux[i]], f"RadarActive_{j}_{i}"
             
-            slots_ancre = int(5 * 60 / resolution)
-            marge_glissement = max(0, slots_nuit_standard - slots_ancre)
-            
-            if slots_nuit_standard > 0:
-                for i_jour, jour in enumerate(jours_semaine):
-                    if jour == "Dimanche": continue 
-                    jour_suivant = jours_semaine[i_jour + 1] 
-                    
-                    if couche_min < "12:00":
-                        c_ancre = f"{jour_suivant}_{couche_min}"
-                    else:
-                        c_ancre = f"{jour}_{couche_min}"
-                        
-                    if c_ancre in creneaux_globaux:
-                        idx_ancre = creneaux_globaux.index(c_ancre)
-                        v_start = max(0, idx_ancre - marge_glissement)
-                        v_end = idx_ancre
-                        valid_starts = creneaux_globaux[v_start : v_end + 1]
-                        
-                        if valid_starts:
-                            prob += pulp.lpSum(SleepStart[j, jour, s] for s in valid_starts) == 1, f"Doit_Dormir_{j}_{jour}"
-                            for start_slot in valid_starts:
-                                s_idx = creneaux_globaux.index(start_slot)
-                                for k in range(slots_nuit_standard):
-                                    if s_idx + k < len(creneaux_globaux):
-                                        prob += Y[j, creneaux_globaux[s_idx + k]] <= 1 - SleepStart[j, jour, start_slot], f"Dort_{j}_{jour}_{start_slot}_{k}"
+            limite_radar = min(i + radar_slots + 1, len(creneaux_globaux))
+            if limite_radar > i + 1:
+                # Le bonus nécessite qu'au moins 1 créneau soit joué dans la zone du radar
+                prob += BonusRadar[j, creneaux_globaux[i]] <= pulp.lpSum(Y[j, creneaux_globaux[k]] for k in range(i+1, limite_radar)), f"RadarDetect_{j}_{i}"
+            else:
+                prob += BonusRadar[j, creneaux_globaux[i]] == 0
+
+    # ==========================================
 
     for c in creneaux_globaux:
         for j in joueurs:
@@ -223,14 +226,18 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
     objectif = []
+    
+    # Objectifs de base
     objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-100 * (Max_Temps - Min_Temps))
+    
+    # Ajout du Bonus Radar à la fonction objectif (500 points par créneau bien entouré)
+    objectif.append(500 * pulp.lpSum(BonusRadar[j, c] for j in joueurs for c in creneaux_globaux))
 
     for j in joueurs:
         for c_global in creneaux_globaux:
             jour, h_str = c_global.split("_")
             
-            # OPTIMISATION ICI
             cle_recherche = f"{j}_{jour}"
             dispos_j = dict_dispos_jour.get(cle_recherche, [])
             d_jour = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
@@ -286,7 +293,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, joueurs_simultanes, as
             p_force = force['planning']
             prob += X[force['nom'], p_force, c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
+    # OPTIMISATION MAJEURE : gapRel à 5%
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60, gapRel=0.05))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -363,7 +371,6 @@ def generer_grille_html(planning, joueurs_uniques, resolution):
 # INTERFACE UTILISATEUR
 # ==========================================
 
-# CHARGEMENT GLOBAL DES DONNÉES (Évite les requêtes multiples dans l'UI)
 donnees_globales = charger_donnees()
 
 st.title("Générateur de Planning Unibet Multi-Limites 🗓️")
@@ -401,12 +408,6 @@ if not est_admin:
             creneau_min_adj = 30
             
             st.markdown("---")
-            st.markdown("#### 🌙 Nuit")
-            st.write("Sélectionnez une sous-plage horaire de votre nuit")
-            options_intervalle = [f"{h:02d}:00 - {(h+5)%24:02d}:00" for h in range(24)]
-            intervalle_nuit = st.selectbox("Nuit intervalle (5h)", options_intervalle, index=options_intervalle.index("00:00 - 05:00"))
-
-            st.markdown("---")
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
@@ -419,7 +420,7 @@ if not est_admin:
             
             st.markdown("---")
             st.markdown("#### 🔄 Mettre à jour mon profil")
-            st.write("Un changement de rythme ? Appliquez vos paramètres actuels (nuit, max heures...) à tous vos créneaux existants d'un coup.")
+            st.write("Un changement de rythme ? Appliquez vos paramètres actuels à tous vos créneaux existants d'un coup.")
             btn_mettre_a_jour = st.form_submit_button("Mettre à jour tous mes anciens créneaux", type="secondary")
 
         if btn_ajouter:
@@ -436,8 +437,7 @@ if not est_admin:
                         "break_min_heavy": break_min_heavy, "break_max_cond": break_max_cond,
                         "t_min_adj": creneau_min_adj,
                         "heures_max_hebdo": heures_max_hebdo,
-                        "heures_max_jour": heures_max_jour,
-                        "intervalle_nuit": intervalle_nuit
+                        "heures_max_jour": heures_max_jour
                     }
                     ajouter_dispo(nouvelle_dispo)
                 st.success("Créneaux ajoutés avec succès !")
@@ -456,7 +456,8 @@ if not est_admin:
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
-                        d["intervalle_nuit"] = intervalle_nuit
+                        if "intervalle_nuit" in d:
+                            del d["intervalle_nuit"] # Nettoyage de l'ancienne variable
                         ajouter_dispo(d)
                 st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
                 st.rerun()
@@ -488,6 +489,7 @@ if est_admin:
             "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
             "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
             "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
+            "pause_interdite_min": 6,
             "repos_nuit_min": 10
         })
         st.rerun()
@@ -497,6 +499,8 @@ if est_admin:
     with tab_liste:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
+            if "intervalle_nuit" in df.columns:
+                df = df.drop(columns=["intervalle_nuit"])
             st.dataframe(df.drop(columns=["id"]), use_container_width=True)
             
             options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees_globales}
@@ -527,7 +531,7 @@ if est_admin:
                 st.rerun()
 
     with tab_param:
-        st.subheader("Matrice des Affinités")
+        st.subheader("Matrice des Affinités et Pauses")
         affinites_admin = charger_matrice_affinites()
         
         with st.form("form_affinites"):
@@ -549,12 +553,22 @@ if est_admin:
             affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
 
             st.markdown("---")
-            repos_nuit = st.number_input("Durée de la nuit obligatoire (Heures consécutives)", value=affinites_admin.get("repos_nuit_min", 10), step=1)
+            st.markdown("**🛌 Paramètres des Cycles de Repos :**")
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                pause_interdite = st.number_input("Début Zone Interdite (Max pause courte)", value=affinites_admin.get("pause_interdite_min", 6), step=1)
+            with c_p2:
+                repos_nuit = st.number_input("Fin Zone Interdite (Vraie nuit min)", value=affinites_admin.get("repos_nuit_min", 10), step=1)
+                
+            affinites_admin["pause_interdite_min"] = pause_interdite
             affinites_admin["repos_nuit_min"] = repos_nuit
                 
-            if st.form_submit_button("Enregistrer la matrice", type="primary"):
-                sauvegarder_matrice_affinites(affinites_admin)
-                st.success("Matrice enregistrée !")
+            if st.form_submit_button("Enregistrer la configuration", type="primary"):
+                if pause_interdite >= repos_nuit:
+                    st.error("Le début de la zone interdite doit être strictement inférieur à la vraie nuit.")
+                else:
+                    sauvegarder_matrice_affinites(affinites_admin)
+                    st.success("Configuration enregistrée !")
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
@@ -567,7 +581,7 @@ if est_admin:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                with st.spinner('Calcul de la répartition optimale en cours... (Ce sera beaucoup plus rapide grâce au cache !)'):
+                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 5%)..."):
                     planning_complet, temps_totaux = optimiser_planning_hebdo(
                         donnees_globales, resolution, joueurs_simultanes, 
                         st.session_state.assignations_forcees, matrice
