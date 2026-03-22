@@ -207,7 +207,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             prob += pulp.lpSum(X[j, p, c] for p in PLANNINGS_DISPOS) <= 1, f"Unicite_{j}_{c}"
 
     objectif = []
-    objectif.append(10000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
+    objectif.append(100000 * pulp.lpSum(Y[j, c] for j in joueurs for c in creneaux_globaux))
     objectif.append(-10 * (Max_Temps - Min_Temps)) 
 
     for j in joueurs:
@@ -264,7 +264,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.02))
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.00))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
