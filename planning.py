@@ -75,18 +75,20 @@ def sauvegarder_matrice_affinites(data):
     db.collection('config').document('affinites').set(data)
     charger_matrice_affinites.clear()
 
-def publier_planning_officiel(planning_data, resolution):
+def publier_planning_officiel(planning_data, resolution, visible=True):
     db.collection('plannings').document('officiel').set({
         "donnees": planning_data,
-        "resolution": resolution
+        "resolution": resolution,
+        "visible": visible
     })
 
 def charger_planning_officiel():
     doc = db.collection('plannings').document('officiel').get()
     if doc.exists:
         data = doc.to_dict()
-        return data.get("donnees", []), data.get("resolution", 30)
-    return [], 30
+        # On retourne aussi le statut de visibilité
+        return data.get("donnees", []), data.get("resolution", 30), data.get("visible", True)
+    return [], 30, False
 
 # ==========================================
 # CONNEXION GOOGLE SHEETS
@@ -138,9 +140,9 @@ def mettre_a_jour_google_sheet(planning, resolution):
         })
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
-def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, matrice_affinites):
+def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, matrice_affinites, gap_rel=0.005):
     if not donnees_totales:
-        return [], {}
+        return [], {}, 'No Data'
 
     dict_joueurs = {d["nom"]: d for d in donnees_totales}
     dict_dispos_jour = {}
@@ -176,8 +178,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         "50":  ["Planning 50"]
     }
 
-    # Constantes pour la fenêtre glissante
     slots_dans_24h = int((24 * 60) / resolution)
+    creneaux_par_jour = {jour: [c for c in creneaux_globaux if c.startswith(jour)] for jour in jours_semaine}
         
     for j in joueurs:
         prob += Temps_Total[j] == pulp.lpSum(Y[j, c] for c in creneaux_globaux), f"Calc_Temps_{j}"
@@ -188,16 +190,33 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
             
-        # NOUVELLE RÈGLE : Fenêtre glissante de 24h
         max_h_24h = d_joueur.get("heures_max_jour", 6)
         max_slots_24h = int((max_h_24h * 60) / resolution)
         
         for i in range(len(creneaux_globaux)):
-            # On regarde les slots de 'i' jusqu'à 'i + 24h' (ou la fin de la semaine si on déborde)
             fenetre = min(slots_dans_24h, len(creneaux_globaux) - i)
-            # Inutile de créer une contrainte si la fenêtre restante est plus courte que le max autorisé
             if fenetre > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
+
+        # NOUVELLE RÈGLE : PAUSE REPAS
+        for jour, creneaux_j in creneaux_par_jour.items():
+            dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
+            if dispos_j:
+                d_jour_data = dispos_j[0]
+                repas_duree = d_jour_data.get("repas_duree", 0)
+                if repas_duree > 0:
+                    r_debut = d_jour_data.get("repas_debut", "11:00")
+                    r_fin = d_jour_data.get("repas_fin", "15:00")
+                    slots_repas = int(repas_duree / resolution)
+
+                    # Identifier les créneaux qui tombent dans la fenêtre repas
+                    creneaux_fenetre = [c for c in creneaux_j if r_debut <= c.split("_")[1] < (r_fin if r_fin != "23:59" else "24:00")]
+                    
+                    if len(creneaux_fenetre) > slots_repas:
+                        max_work_slots = len(creneaux_fenetre) - slots_repas
+                        prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) <= max_work_slots, f"Repas_{j}_{jour}"
+                    elif len(creneaux_fenetre) > 0:
+                        prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) == 0, f"RepasBlock_{j}_{jour}"
 
     # ==========================================
     # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE (AVEC RESET)
@@ -244,7 +263,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             
     prob += pulp.lpSum(objectif)
 
-    # NOUVELLE CAPACITÉ : Exactement 1 joueur (ou max 1) par créneau/planning de manière stricte
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= 1, f"Cap_{p}_{c}"
@@ -277,7 +295,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=0.005))
+    # Appel au solveur avec le gapRel personnalisable !
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=gap_rel))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -301,7 +320,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     
     return planning_final, temps_hebdo, statut_solveur
 
-# --- NOUVEAU : FONCTION DE LISSAGE ---
+# --- FONCTION DE LISSAGE ---
 def lisser_planning(planning_brut, donnees_totales, resolution):
     if not planning_brut:
         return []
@@ -323,7 +342,6 @@ def lisser_planning(planning_brut, donnees_totales, resolution):
     ordre_jours = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
     cles_triees = sorted(grille.keys(), key=lambda x: (ordre_jours.get(x[0], 7), x[1]))
 
-    # NOUVEAU : On stocke l'état complet (planning + jour + heure)
     etat_precedent = {} 
     
     for cle in cles_triees:
@@ -349,13 +367,10 @@ def lisser_planning(planning_brut, donnees_totales, resolution):
                     valide = False
                     break
                     
-                # NOUVEAU : On vérifie la continuité stricte
                 etat_prec = etat_precedent.get(joueur)
                 if etat_prec and etat_prec["planning"] == planning_cible:
-                    # Est-ce que c'était le même jour ?
                     if etat_prec["jour"] == jour_actuel:
                         h_prec = datetime.strptime(etat_prec["heure"], '%H:%M')
-                        # Est-ce que c'était le créneau JUSTE avant ?
                         if h_prec + timedelta(minutes=resolution) == h_obj_actuel:
                             score += 1 
                     
@@ -367,7 +382,6 @@ def lisser_planning(planning_brut, donnees_totales, resolution):
             for i, joueur in enumerate(meilleure_dispo):
                 planning_cible = plannings_occupes[i]
                 grille[cle][planning_cible] = joueur
-                # Mise à jour de la mémoire avec le timestamp exact
                 etat_precedent[joueur] = {
                     "planning": planning_cible,
                     "jour": jour_actuel,
@@ -474,9 +488,18 @@ if not est_admin:
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
                 
             st.markdown("---")
+            liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
+
+            st.markdown("#### 🍔 Pause Repas")
+            st.write("Indiquez la plage horaire dans laquelle vous souhaitez manger et la durée nécessaire. *(Laissez à 0 si pas de repas)*")
+            col_r1, col_r2, col_r3 = st.columns(3)
+            with col_r1: repas_debut = st.selectbox("Début fenêtre repas", liste_heures, index=liste_heures.index("11:00"))
+            with col_r2: repas_fin = st.selectbox("Fin fenêtre repas", liste_heures, index=liste_heures.index("15:00"))
+            with col_r3: repas_duree = st.number_input("Durée repas (min)", value=60, step=30)
+
+            st.markdown("---")
             st.subheader("Ajouter une disponibilité")
             jours_choisis = st.multiselect("Jours concernés", ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"])
-            liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
             
             col1, col2 = st.columns(2)
             with col1: debut_str = st.selectbox("Arrivée", liste_heures, index=liste_heures.index("18:00"), format_func=lambda x: "Minuit" if x == "23:59" else x)
@@ -486,7 +509,7 @@ if not est_admin:
             
             st.markdown("---")
             st.markdown("#### 🔄 Mettre à jour mon profil")
-            st.write("Un changement de rythme ? Appliquez vos paramètres actuels à tous vos créneaux existants d'un coup.")
+            st.write("Un changement de rythme ou de repas ? Appliquez vos paramètres actuels à tous vos créneaux existants d'un coup.")
             btn_mettre_a_jour = st.form_submit_button("Mettre à jour tous mes anciens créneaux", type="secondary")
 
         if btn_ajouter:
@@ -502,7 +525,10 @@ if not est_admin:
                         "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
                         "break_min_heavy": break_min_heavy,
                         "heures_max_hebdo": heures_max_hebdo,
-                        "heures_max_jour": heures_max_jour
+                        "heures_max_jour": heures_max_jour,
+                        "repas_debut": repas_debut,
+                        "repas_fin": repas_fin,
+                        "repas_duree": repas_duree
                     }
                     ajouter_dispo(nouvelle_dispo)
                 st.success("Créneaux ajoutés avec succès !")
@@ -521,17 +547,20 @@ if not est_admin:
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
+                        d["repas_debut"] = repas_debut
+                        d["repas_fin"] = repas_fin
+                        d["repas_duree"] = repas_duree
                         for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
                             if old_key in d: del d[old_key]
                             
                         ajouter_dispo(d)
-                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique !")
+                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique (y compris les repas) !")
                 st.rerun()
 
         # --- NOUVELLE SECTION : AFFICHAGE DU PLANNING OFFICIEL ---
-        planning_officiel, res_officielle = charger_planning_officiel()
+        planning_officiel, res_officielle, is_visible = charger_planning_officiel()
         
-        if planning_officiel:
+        if planning_officiel and is_visible:
             st.markdown("---")
             st.subheader("📅 Planning Officiel de la Semaine")
             
@@ -550,6 +579,9 @@ if not est_admin:
                 joueur_cible=nom_joueur.strip() if is_solo else None
             )
             st.markdown(html_planning, unsafe_allow_html=True)
+        elif planning_officiel and not is_visible:
+            st.markdown("---")
+            st.info("Le planning a été temporairement masqué par l'administrateur.")
 
         st.markdown("---")
         st.subheader("Vos disponibilités enregistrées")
@@ -661,17 +693,20 @@ if est_admin:
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
-        resolution = st.number_input("Résolution (min)", value=30, step=5)
+        c_res, c_gap = st.columns(2)
+        with c_res: resolution = st.number_input("Résolution (min)", value=30, step=5)
+        # NOUVEAU: gapRel ajustable en interface
+        with c_gap: gap_rel_input = st.number_input("Tolérance Solveur (gapRel)", min_value=0.0, max_value=1.0, value=0.005, step=0.005, format="%.3f")
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
             if not donnees_globales:
                 st.error("Aucune donnée.")
             else:
                 matrice = charger_matrice_affinites()
-                with st.spinner("Génération du planning avec contraintes dynamiques (Tolérance 0.5%)..."):
+                with st.spinner(f"Génération du planning avec contraintes dynamiques (Tolérance {gap_rel_input*100}%)..."):
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
-                        st.session_state.assignations_forcees, matrice
+                        st.session_state.assignations_forcees, matrice, gap_rel=gap_rel_input
                     )
                     
                     if planning_brut:
@@ -687,7 +722,7 @@ if est_admin:
             
             st.markdown("---")
             if st.session_state.statut_solveur == 'Optimal':
-                st.success("✅ **Statut Optimal (Marge de 0.5%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
+                st.success(f"✅ **Statut Optimal (Marge de {gap_rel_input*100}%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
             elif st.session_state.statut_solveur == 'Not Solved':
                 st.warning("⏱️ **Temps écoulé (10 min)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
             else:
@@ -706,16 +741,22 @@ if est_admin:
             st.markdown("---")
             st.markdown("### ☁️ Publication en ligne")
             
-            col_pub1, col_pub2 = st.columns(2)
+            col_pub1, col_pub2, col_pub3 = st.columns(3)
             
             with col_pub1:
-                if st.button("📢 Partager aux joueurs (Interface)", type="primary"):
+                if st.button("📢 Partager aux joueurs", type="primary"):
                     with st.spinner("Publication du planning..."):
-                        publier_planning_officiel(st.session_state.planning_complet, resolution)
-                        st.success("✅ Planning partagé avec succès sur l'interface Joueur !")
-                        
+                        publier_planning_officiel(st.session_state.planning_complet, resolution, visible=True)
+                        st.success("✅ Planning partagé !")
+            # NOUVEAU: Bouton masquer planning
             with col_pub2:
-                if st.button("🌐 Mettre à jour le Google Sheet", type="secondary"):
+                if st.button("🙈 Masquer aux joueurs", type="secondary"):
+                    with st.spinner("Mise à jour..."):
+                        publier_planning_officiel(st.session_state.planning_complet, resolution, visible=False)
+                        st.info("Le planning est maintenant caché.")
+                        
+            with col_pub3:
+                if st.button("🌐 MàJ le Google Sheet", type="secondary"):
                     with st.spinner("Envoi des données..."):
                         try:
                             mettre_a_jour_google_sheet(st.session_state.planning_complet, resolution)
