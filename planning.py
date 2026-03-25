@@ -510,7 +510,7 @@ if not est_admin:
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
 
             st.markdown("#### 🍔 Pause Repas")
-            st.write("Indiquez la plage horaire dans laquelle vous souhaitez manger et la durée nécessaire. *(Laissez à 0 si vous pouvez vous adaptez)*")
+            st.write("Indiquez la plage horaire dans laquelle vous souhaitez manger et la durée nécessaire. *(Laissez à 0 si vous pouvez vous adapter)*")
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1: repas_debut = st.selectbox("Début fenêtre repas", liste_heures, index=liste_heures.index("11:00"))
             with col_r2: repas_fin = st.selectbox("Fin fenêtre repas", liste_heures, index=liste_heures.index("15:00"))
