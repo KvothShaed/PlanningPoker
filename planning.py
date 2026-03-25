@@ -303,8 +303,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                 
                 if autorise_micro:
                     # L'ASTUCE ANTI-POINTILLÉ : On soustrait Y[t-3].
-                    # Autorise une session d'1 créneau (30m) SI ET SEULEMENT SI :
-                    # il y a eu un break (Y[t-1]=0), il a joué avant (Y[t-2]=1) ET c'était une vraie session (Y[t-3]=1).
                     start_var -= Y[j, creneaux_globaux[i-3]]
                     
                 for k in range(1, min_slots):
@@ -507,17 +505,16 @@ if not est_admin:
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
 
             st.markdown("#### ⚡ Exception : Micro-session")
-            micro_session_ok = st.checkbox("Autoriser une session courte (1 créneau) pour terminer, si la pause précédente était d'1 créneau (30 min)", value=False)
+            micro_session_ok = st.checkbox("Autoriser une session courte (30min) à la suite d'un break court (30 min)", value=True)
                 
-            st.markdown("---")
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
 
             st.markdown("#### 🍔 Pause Repas")
-            st.write("Indiquez la plage horaire dans laquelle vous souhaitez manger et la durée nécessaire. *(Laissez à 0 si pas de repas)*")
+            st.write("Indiquez la plage horaire dans laquelle vous souhaitez manger et la durée nécessaire. *(Laissez à 0 si vous pouvez vous adaptez)*")
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1: repas_debut = st.selectbox("Début fenêtre repas", liste_heures, index=liste_heures.index("11:00"))
             with col_r2: repas_fin = st.selectbox("Fin fenêtre repas", liste_heures, index=liste_heures.index("15:00"))
-            with col_r3: repas_duree = st.number_input("Durée repas (min)", value=60, step=30)
+            with col_r3: repas_duree = st.number_input("Durée repas (min)", value=0, step=30)
 
             st.markdown("---")
             st.subheader("Ajouter une disponibilité")
