@@ -198,7 +198,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             if fenetre > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
-        # NOUVELLE RÈGLE : PAUSE REPAS
+        # RÈGLE : PAUSE REPAS
         for jour, creneaux_j in creneaux_par_jour.items():
             dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
             if dispos_j:
@@ -209,7 +209,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     r_fin = d_jour_data.get("repas_fin", "15:00")
                     slots_repas = int(repas_duree / resolution)
 
-                    # Identifier les créneaux qui tombent dans la fenêtre repas
                     creneaux_fenetre = [c for c in creneaux_j if r_debut <= c.split("_")[1] < (r_fin if r_fin != "23:59" else "24:00")]
                     
                     if len(creneaux_fenetre) > slots_repas:
@@ -272,6 +271,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         max_slots = int(d_joueur["t_max_affile"] / resolution)
         min_slots = int(d_joueur["t_min_base"] / resolution)
         break_slots = int(d_joueur.get("break_min_heavy", 30) / resolution) 
+        autorise_micro = d_joueur.get("micro_session_ok", False)
         
         if max_slots > 0 and break_slots > 0 and len(creneaux_globaux) > (max_slots + break_slots):
             fenetre = max_slots + break_slots
@@ -283,10 +283,30 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
                 
         if min_slots > 1:
+            # i = 0
             for k in range(1, min_slots):
                 prob += Y[j, creneaux_globaux[0]] <= Y[j, creneaux_globaux[k]], f"Min_{j}_0_{k}"
-            for i in range(1, len(creneaux_globaux) - min_slots + 1):
+            # i = 1
+            if len(creneaux_globaux) > 1:
+                start_var_1 = Y[j, creneaux_globaux[1]] - Y[j, creneaux_globaux[0]]
+                for k in range(1, min_slots):
+                    prob += start_var_1 <= Y[j, creneaux_globaux[1+k]], f"Min_{j}_1_{k}"
+            # i = 2
+            if len(creneaux_globaux) > 2:
+                start_var_2 = Y[j, creneaux_globaux[2]] - Y[j, creneaux_globaux[1]]
+                for k in range(1, min_slots):
+                    prob += start_var_2 <= Y[j, creneaux_globaux[2+k]], f"Min_{j}_2_{k}"
+
+            # i >= 3
+            for i in range(3, len(creneaux_globaux) - min_slots + 1):
                 start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
+                
+                if autorise_micro:
+                    # L'ASTUCE ANTI-POINTILLÉ : On soustrait Y[t-3].
+                    # Autorise une session d'1 créneau (30m) SI ET SEULEMENT SI :
+                    # il y a eu un break (Y[t-1]=0), il a joué avant (Y[t-2]=1) ET c'était une vraie session (Y[t-3]=1).
+                    start_var -= Y[j, creneaux_globaux[i-3]]
+                    
                 for k in range(1, min_slots):
                     prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
@@ -295,7 +315,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # Appel au solveur avec le gapRel personnalisable !
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=gap_rel))
     
     planning_final = []
@@ -486,6 +505,9 @@ if not est_admin:
                 creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
             with c2: 
                 break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
+
+            st.markdown("#### ⚡ Exception : Micro-session")
+            micro_session_ok = st.checkbox("Autoriser une session courte (1 créneau) pour terminer, si la pause précédente était d'1 créneau (30 min)", value=False)
                 
             st.markdown("---")
             liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
@@ -526,6 +548,7 @@ if not est_admin:
                         "break_min_heavy": break_min_heavy,
                         "heures_max_hebdo": heures_max_hebdo,
                         "heures_max_jour": heures_max_jour,
+                        "micro_session_ok": micro_session_ok,
                         "repas_debut": repas_debut,
                         "repas_fin": repas_fin,
                         "repas_duree": repas_duree
@@ -547,6 +570,7 @@ if not est_admin:
                         d["t_max_affile"] = temps_max_affile
                         d["t_min_base"] = creneau_min_base
                         d["break_min_heavy"] = break_min_heavy
+                        d["micro_session_ok"] = micro_session_ok
                         d["repas_debut"] = repas_debut
                         d["repas_fin"] = repas_fin
                         d["repas_duree"] = repas_duree
@@ -554,10 +578,10 @@ if not est_admin:
                             if old_key in d: del d[old_key]
                             
                         ajouter_dispo(d)
-                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique (y compris les repas) !")
+                st.success("✅ Vos anciens créneaux intègrent désormais votre nouvelle logique (y compris les repas et la micro-session) !")
                 st.rerun()
 
-        # --- NOUVELLE SECTION : AFFICHAGE DU PLANNING OFFICIEL ---
+        # --- SECTION : AFFICHAGE DU PLANNING OFFICIEL ---
         planning_officiel, res_officielle, is_visible = charger_planning_officiel()
         
         if planning_officiel and is_visible:
@@ -695,7 +719,6 @@ if est_admin:
         st.subheader("Lancer l'Optimisation Mathématique")
         c_res, c_gap = st.columns(2)
         with c_res: resolution = st.number_input("Résolution (min)", value=30, step=5)
-        # NOUVEAU: gapRel ajustable en interface
         with c_gap: gap_rel_input = st.number_input("Tolérance Solveur (gapRel)", min_value=0.0, max_value=1.0, value=0.005, step=0.005, format="%.3f")
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
@@ -748,7 +771,6 @@ if est_admin:
                     with st.spinner("Publication du planning..."):
                         publier_planning_officiel(st.session_state.planning_complet, resolution, visible=True)
                         st.success("✅ Planning partagé !")
-            # NOUVEAU: Bouton masquer planning
             with col_pub2:
                 if st.button("🙈 Masquer aux joueurs", type="secondary"):
                     with st.spinner("Mise à jour..."):
