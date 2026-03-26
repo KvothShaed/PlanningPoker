@@ -72,16 +72,20 @@ def supprimer_entree(id_entree):
     db.collection('dispos').document(id_entree).delete()
     charger_donnees.clear()
 
-def vider_toutes_les_dispos():
+# NOUVELLE FONCTION SÉCURISÉE DE SUPPRESSION PAR SEMAINE
+def vider_dispos_semaine(annee, semaine):
     docs = db.collection('dispos').stream()
     batch = db.batch()
     count = 0
     for doc in docs:
-        batch.delete(doc.reference)
-        count += 1
-        if count % 500 == 0:
-            batch.commit()
-            batch = db.batch()
+        d = doc.to_dict()
+        # On ne supprime que si ça correspond exactement à l'année et la semaine ciblées
+        if d.get("annee_cible") == annee and d.get("semaine_cible") == semaine:
+            batch.delete(doc.reference)
+            count += 1
+            if count % 500 == 0:
+                batch.commit()
+                batch = db.batch()
     if count % 500 != 0:
         batch.commit()
     charger_donnees.clear()
@@ -652,16 +656,13 @@ if est_admin:
     donnees_semaine = [d for d in donnees_globales if d.get('semaine_cible', target_week) == admin_semaine and d.get('annee_cible', target_year) == admin_annee]
     noms_dispos = list(set([d["nom"] for d in donnees_semaine])) if donnees_semaine else []
     
-    if st.button("🗑️ Effacer TOUTES les données de cette base (Toutes semaines)"):
-        vider_toutes_les_dispos()
-        st.session_state.assignations_forcees = []
-        sauvegarder_matrice_affinites({
-            "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-            "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
-            "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
-            "pause_interdite_min": 6,
-            "repos_nuit_min": 10
-        })
+    # NOUVEAU BOUTON DE SUPPRESSION SÉCURISÉ (Par semaine uniquement)
+    st.markdown("---")
+    st.markdown("### 🧹 Nettoyage des données")
+    st.info(f"Le bouton ci-dessous supprime uniquement les créneaux enregistrés pour la **Semaine {admin_semaine} ({admin_annee})**. Vos anciennes données et les semaines futures sont protégées.")
+    if st.button(f"🗑️ Effacer uniquement les créneaux de la Semaine {admin_semaine} ({admin_annee})", type="secondary"):
+        vider_dispos_semaine(admin_annee, admin_semaine)
+        st.success(f"Toutes les disponibilités de la Semaine {admin_semaine} ont été effacées.")
         st.rerun()
 
     tab_liste, tab_force, tab_param, tab_gen = st.tabs(["📋 Liste des Créneaux", "🛠️ Assignations", "⚙️ Paramètres", "🚀 Génération & Planning"])
@@ -687,7 +688,7 @@ if est_admin:
                 df = df.sort_values(by=['nom', 'jour', 'debut']).reset_index(drop=True)
                 st.dataframe(df, use_container_width=True)
                 
-                st.markdown("### 🗑️ Suppression de créneaux")
+                st.markdown("### 🗑️ Suppression de créneaux (Ciblée)")
                 joueurs_liste = sorted(df['nom'].unique().tolist())
                 joueur_filtre = st.selectbox("1. Filtrer par joueur :", ["Tous"] + joueurs_liste)
                 
