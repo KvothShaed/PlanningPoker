@@ -164,7 +164,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
 
     joueurs = list(dict_joueurs.keys())
     
-    # VARIABLES
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
 
@@ -186,36 +185,78 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
+        # Seul le paramètre Hebdomadaire reste 100% global au joueur (lu sur la dernière donnée enregistrée)
         d_joueur = dict_joueurs.get(j)
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
-            
-        max_h_24h = d_joueur.get("heures_max_jour", 6)
-        max_slots_24h = int((max_h_24h * 60) / resolution)
-        
-        for i in range(len(creneaux_globaux)):
-            fenetre = min(slots_dans_24h, len(creneaux_globaux) - i)
-            if fenetre > max_slots_24h:
-                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
-        # RÈGLE : PAUSE REPAS
+        # 🍔 RÈGLE : PAUSE REPAS (Dynamique par jour)
         for jour, creneaux_j in creneaux_par_jour.items():
             dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
-            if dispos_j:
-                d_jour_data = dispos_j[0]
-                repas_duree = d_jour_data.get("repas_duree", 0)
-                if repas_duree > 0:
+            repas_vus = set()
+            for d_jour_data in dispos_j:
+                r_duree = d_jour_data.get("repas_duree", 0)
+                if r_duree > 0:
                     r_debut = d_jour_data.get("repas_debut", "11:00")
                     r_fin = d_jour_data.get("repas_fin", "15:00")
-                    slots_repas = int(repas_duree / resolution)
-
-                    creneaux_fenetre = [c for c in creneaux_j if r_debut <= c.split("_")[1] < (r_fin if r_fin != "23:59" else "24:00")]
+                    cle_repas = (r_debut, r_fin, r_duree)
                     
-                    if len(creneaux_fenetre) > slots_repas:
-                        max_work_slots = len(creneaux_fenetre) - slots_repas
-                        prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) <= max_work_slots, f"Repas_{j}_{jour}"
-                    elif len(creneaux_fenetre) > 0:
-                        prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) == 0, f"RepasBlock_{j}_{jour}"
+                    if cle_repas not in repas_vus:
+                        repas_vus.add(cle_repas)
+                        slots_repas = int(r_duree / resolution)
+                        creneaux_fenetre = [c for c in creneaux_j if r_debut <= c.split("_")[1] < (r_fin if r_fin != "23:59" else "24:00")]
+                        
+                        if len(creneaux_fenetre) > slots_repas:
+                            max_work_slots = len(creneaux_fenetre) - slots_repas
+                            prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) <= max_work_slots, f"Repas_{j}_{jour}_{r_debut}"
+                        elif len(creneaux_fenetre) > 0:
+                            prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) == 0, f"RepasBlock_{j}_{jour}_{r_debut}"
+
+        # ⚙️ RÈGLES DE RYTHME (100% Dynamiques par créneau)
+        for i in range(len(creneaux_globaux)):
+            c_val = creneaux_globaux[i]
+            jour_c, h_str = c_val.split("_")
+            dispos_j = dict_dispos_jour.get(f"{j}_{jour_c}", [])
+            
+            # Recherche des paramètres EXACTS pour le créneau visé
+            d_cible = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
+            
+            if not d_cible:
+                continue
+
+            max_h_24h = d_cible.get("heures_max_jour", 6)
+            max_slots_24h = int((max_h_24h * 60) / resolution)
+            
+            max_slots = int(d_cible.get("t_max_affile", 120) / resolution)
+            min_slots = int(d_cible.get("t_min_base", 60) / resolution)
+            break_slots = int(d_cible.get("break_min_heavy", 30) / resolution) 
+            autorise_micro = d_cible.get("micro_session_ok", False)
+
+            # Règle des 24h Glissantes
+            fenetre_24 = min(slots_dans_24h, len(creneaux_globaux) - i)
+            if fenetre_24 > max_slots_24h:
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_24)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
+
+            # Temps Max Affilé & Temps de Break Heavy
+            if max_slots > 0 and break_slots > 0:
+                fenetre_break = max_slots + break_slots
+                if i + fenetre_break <= len(creneaux_globaux):
+                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_break)) <= max_slots, f"Break_{j}_{i}"
+            elif max_slots > 0:
+                if i + max_slots < len(creneaux_globaux):
+                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
+
+            # Temps Minimum par Session (avec astuce micro-session)
+            if min_slots > 1 and i + min_slots <= len(creneaux_globaux):
+                if i == 0:
+                    start_var = Y[j, creneaux_globaux[0]]
+                else:
+                    start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
+                    if autorise_micro and i >= 3:
+                        start_var -= Y[j, creneaux_globaux[i-3]]
+                
+                for k in range(1, min_slots):
+                    prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
     # ==========================================
     # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE (AVEC RESET)
@@ -265,41 +306,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     for c in creneaux_globaux:
         for p in PLANNINGS_DISPOS:
             prob += pulp.lpSum(X[j, p, c] for j in joueurs) <= 1, f"Cap_{p}_{c}"
-
-    for j in joueurs:
-        d_joueur = dict_joueurs.get(j)
-        max_slots = int(d_joueur["t_max_affile"] / resolution)
-        min_slots = int(d_joueur["t_min_base"] / resolution)
-        break_slots = int(d_joueur.get("break_min_heavy", 30) / resolution) 
-        autorise_micro = d_joueur.get("micro_session_ok", False)
-        
-        if max_slots > 0 and break_slots > 0 and len(creneaux_globaux) > (max_slots + break_slots):
-            fenetre = max_slots + break_slots
-            for i in range(len(creneaux_globaux) - fenetre + 1):
-                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre)) <= max_slots, f"Break_{j}_{i}"
-                
-        elif max_slots > 0 and len(creneaux_globaux) > max_slots:
-            for i in range(len(creneaux_globaux) - max_slots):
-                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
-                
-        if min_slots > 1:
-            for k in range(1, min_slots):
-                prob += Y[j, creneaux_globaux[0]] <= Y[j, creneaux_globaux[k]], f"Min_{j}_0_{k}"
-            if len(creneaux_globaux) > 1:
-                start_var_1 = Y[j, creneaux_globaux[1]] - Y[j, creneaux_globaux[0]]
-                for k in range(1, min_slots):
-                    prob += start_var_1 <= Y[j, creneaux_globaux[1+k]], f"Min_{j}_1_{k}"
-            if len(creneaux_globaux) > 2:
-                start_var_2 = Y[j, creneaux_globaux[2]] - Y[j, creneaux_globaux[1]]
-                for k in range(1, min_slots):
-                    prob += start_var_2 <= Y[j, creneaux_globaux[2+k]], f"Min_{j}_2_{k}"
-
-            for i in range(3, len(creneaux_globaux) - min_slots + 1):
-                start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
-                if autorise_micro:
-                    start_var -= Y[j, creneaux_globaux[i-3]]
-                for k in range(1, min_slots):
-                    prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
     for force in assignations_forcees:
         c_cible = f"{force['jour']}_{force['heure']}"
@@ -616,7 +622,7 @@ if not est_admin:
                         
                     st.caption(details)
                 with col_btn:
-                    st.write("") # Espace pour aligner le bouton avec le texte
+                    st.write("")
                     if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
                         st.rerun()
@@ -644,16 +650,13 @@ if est_admin:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
             
-            # Nettoyage des colonnes obsolètes pour l'affichage
             colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj"]
             df = df.drop(columns=[c for c in colonnes_a_ignorer if c in df.columns])
             
             if not df.empty:
-                # Réorganisation des colonnes et tri alphabétique/chronologique
                 cols = df.columns.tolist()
                 first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'micro_session_ok', 'repas_debut', 'repas_fin', 'repas_duree']
                 
-                # S'assurer que toutes les colonnes cibles existent même si des anciens créneaux n'ont pas la donnée
                 for fc in first_cols:
                     if fc not in df.columns:
                         df[fc] = None
@@ -662,13 +665,11 @@ if est_admin:
                 other_cols = [c for c in cols if c not in first_cols and c != 'id']
                 df = df[first_cols + other_cols]
                 
-                # Tri des données pour que tout soit groupé par joueur
                 df = df.sort_values(by=['nom', 'jour', 'debut']).reset_index(drop=True)
                 st.dataframe(df, use_container_width=True)
                 
                 st.markdown("### 🗑️ Suppression de créneaux")
                 
-                # NOUVEAU : Filtre par joueur pour la suppression
                 joueurs_liste = sorted(df['nom'].unique().tolist())
                 joueur_filtre = st.selectbox("1. Filtrer par joueur :", ["Tous"] + joueurs_liste)
                 
