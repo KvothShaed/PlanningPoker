@@ -1,5 +1,5 @@
 import streamlit as st
-import streamlit.components.v1 as components # NOUVEAU : Pour le chronomètre en JavaScript
+import streamlit.components.v1 as components 
 import pandas as pd
 import uuid
 import pulp
@@ -26,23 +26,21 @@ if 'assignations_forcees' not in st.session_state:
 # GESTION DU TEMPS ET DE LA DEADLINE
 # ==========================================
 def get_planning_context():
-    # On force l'heure de Paris pour éviter les bugs de serveur
     tz = ZoneInfo("Europe/Paris")
     now = datetime.now(tz)
     
     current_weekday = now.weekday() # 0 = Lundi, 5 = Samedi
     
-    # Calcul du samedi de la semaine en cours à 12h00
     days_to_saturday = 5 - current_weekday
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     saturday_noon = today_start + timedelta(days=days_to_saturday, hours=12)
     
     if now < saturday_noon:
         is_locked = False
-        target_date = now + timedelta(days=7) # On prépare la semaine prochaine
+        target_date = now + timedelta(days=7) 
     else:
         is_locked = True
-        target_date = saturday_noon + timedelta(days=7) # Le calcul cible toujours la semaine prochaine
+        target_date = saturday_noon + timedelta(days=7) 
         
     target_year, target_week, _ = target_date.isocalendar()
     return target_year, target_week, saturday_noon, is_locked, now
@@ -454,11 +452,11 @@ if not est_admin:
         st.markdown(f"### Bienvenue {nom_joueur} !")
         st.write(f"📅 **Préparation de la Semaine {target_week}** (Année {target_year})")
         
-        # --- LE CHRONOMÈTRE JS (COMPOSANT HTML) ---
+        # --- LE CHRONOMÈTRE JS (DESIGN SOMBRE) ---
         if not is_locked:
             compte_a_rebours_html = f"""
-            <div style="padding: 15px; border-radius: 8px; background-color: #e8f5e9; border: 1px solid #c8e6c9; color: #2e7d32; text-align: center; font-size: 18px; font-family: sans-serif;">
-                ⏳ <b>Clôture des dispos (Samedi 12h00) :</b> <span id="countdown" style="font-weight: bold; font-family: monospace;"></span>
+            <div style="padding: 15px; border-radius: 8px; background-color: #1E1E1E; border: 1px solid #444444; color: #FFFFFF; text-align: center; font-size: 18px; font-family: sans-serif;">
+                ⏳ <b>Clôture des dispos (Samedi 12h00) :</b> <span id="countdown" style="font-weight: bold; font-family: monospace; color: #4CAF50;"></span>
             </div>
             <script>
                 var countDownDate = new Date("{deadline_dt.isoformat()}").getTime();
@@ -468,6 +466,7 @@ if not est_admin:
                     if (distance < 0) {{
                         clearInterval(x);
                         document.getElementById("countdown").innerHTML = "EXPIRÉE";
+                        document.getElementById("countdown").style.color = "#FF5252";
                     }} else {{
                         var days = Math.floor(distance / (1000 * 60 * 60 * 24));
                         var hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
