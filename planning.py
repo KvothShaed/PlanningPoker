@@ -29,6 +29,8 @@ def get_planning_context():
     tz = ZoneInfo("Europe/Paris")
     now = datetime.now(tz)
     
+    current_year, current_week, _ = now.isocalendar()
+    
     current_weekday = now.weekday() # 0 = Lundi, 5 = Samedi
     
     days_to_saturday = 5 - current_weekday
@@ -43,9 +45,9 @@ def get_planning_context():
         target_date = saturday_noon + timedelta(days=7) 
         
     target_year, target_week, _ = target_date.isocalendar()
-    return target_year, target_week, saturday_noon, is_locked, now
+    return current_year, current_week, target_year, target_week, saturday_noon, is_locked, now
 
-target_year, target_week, deadline_dt, is_locked, now_local = get_planning_context()
+current_year, current_week, target_year, target_week, deadline_dt, is_locked, now_local = get_planning_context()
 
 # ==========================================
 # INITIALISATION DE FIREBASE
@@ -79,7 +81,6 @@ def vider_dispos_semaine(annee, semaine):
     count = 0
     for doc in docs:
         d = doc.to_dict()
-        # On ne supprime que si ça correspond exactement à l'année et la semaine ciblées
         if d.get("annee_cible") == annee and d.get("semaine_cible") == semaine:
             batch.delete(doc.reference)
             count += 1
@@ -591,12 +592,23 @@ if not est_admin:
                         st.rerun()
 
         # --- SECTION : AFFICHAGE DU PLANNING OFFICIEL ---
-        planning_officiel, res_officielle, is_visible = charger_planning_officiel(annee=target_year, semaine=target_week)
+        st.markdown("---")
+        st.subheader("📅 Planning Officiel")
+        
+        # Le joueur choisit la semaine qu'il veut consulter
+        choix_semaine = st.radio(
+            "Consulter la période :", 
+            [f"Semaine en cours (S{current_week})", f"Semaine prochaine (S{target_week})"], 
+            horizontal=True
+        )
+        
+        # On détermine quelles données charger selon son choix
+        vue_annee = current_year if "en cours" in choix_semaine else target_year
+        vue_semaine = current_week if "en cours" in choix_semaine else target_week
+        
+        planning_officiel, res_officielle, is_visible = charger_planning_officiel(annee=vue_annee, semaine=vue_semaine)
         
         if planning_officiel and is_visible:
-            st.markdown("---")
-            st.subheader(f"📅 Planning Officiel (Semaine {target_week})")
-            
             is_solo = st.toggle("👀 Mettre en évidence uniquement mes créneaux", value=False)
             
             heures_joueur = sum([res_officielle/60 for p in planning_officiel if nom_joueur.strip() in p['Joueurs_Liste']])
@@ -609,8 +621,9 @@ if not est_admin:
             st.markdown(html_planning, unsafe_allow_html=True)
             
         elif planning_officiel and not is_visible:
-            st.markdown("---")
             st.info("Le planning a été temporairement masqué par l'administrateur.")
+        else:
+            st.warning(f"Aucun planning n'a encore été publié pour la Semaine {vue_semaine}.")
 
         st.markdown("---")
         st.subheader(f"Vos disponibilités (Semaine {target_week})")
