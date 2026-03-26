@@ -8,6 +8,7 @@ import colorsys
 import gspread
 from google.oauth2.service_account import Credentials
 import itertools
+import time
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -86,7 +87,6 @@ def charger_planning_officiel():
     doc = db.collection('plannings').document('officiel').get()
     if doc.exists:
         data = doc.to_dict()
-        # On retourne aussi le statut de visibilité
         return data.get("donnees", []), data.get("resolution", 30), data.get("visible", True)
     return [], 30, False
 
@@ -140,7 +140,7 @@ def mettre_a_jour_google_sheet(planning, resolution):
         })
 
 # --- MOTEUR D'OPTIMISATION MATHÉMATIQUE (PuLP) ---
-def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, matrice_affinites, gap_rel=0.005):
+def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, matrice_affinites, gap_rel=0.005, time_limit=600):
     if not donnees_totales:
         return [], {}, 'No Data'
 
@@ -283,28 +283,21 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
                 
         if min_slots > 1:
-            # i = 0
             for k in range(1, min_slots):
                 prob += Y[j, creneaux_globaux[0]] <= Y[j, creneaux_globaux[k]], f"Min_{j}_0_{k}"
-            # i = 1
             if len(creneaux_globaux) > 1:
                 start_var_1 = Y[j, creneaux_globaux[1]] - Y[j, creneaux_globaux[0]]
                 for k in range(1, min_slots):
                     prob += start_var_1 <= Y[j, creneaux_globaux[1+k]], f"Min_{j}_1_{k}"
-            # i = 2
             if len(creneaux_globaux) > 2:
                 start_var_2 = Y[j, creneaux_globaux[2]] - Y[j, creneaux_globaux[1]]
                 for k in range(1, min_slots):
                     prob += start_var_2 <= Y[j, creneaux_globaux[2+k]], f"Min_{j}_2_{k}"
 
-            # i >= 3
             for i in range(3, len(creneaux_globaux) - min_slots + 1):
                 start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
-                
                 if autorise_micro:
-                    # L'ASTUCE ANTI-POINTILLÉ : On soustrait Y[t-3].
                     start_var -= Y[j, creneaux_globaux[i-3]]
-                    
                 for k in range(1, min_slots):
                     prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
@@ -313,7 +306,8 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=600, gapRel=gap_rel))
+    # L'appel au solveur inclut maintenant la variable time_limit
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit, gapRel=gap_rel))
     
     planning_final = []
     temps_hebdo = {j: 0 for j in joueurs}
@@ -571,6 +565,7 @@ if not est_admin:
                         d["repas_debut"] = repas_debut
                         d["repas_fin"] = repas_fin
                         d["repas_duree"] = repas_duree
+                        # Nettoyage des vieilles variables fantômes
                         for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
                             if old_key in d: del d[old_key]
                             
@@ -641,16 +636,38 @@ if est_admin:
     with tab_liste:
         if donnees_globales:
             df = pd.DataFrame(donnees_globales)
-            colonnes_a_ignorer = ["id", "intervalle_nuit", "break_max_cond", "t_min_adj"]
-            cols_to_drop = [c for c in colonnes_a_ignorer if c in df.columns]
-            st.dataframe(df.drop(columns=cols_to_drop), use_container_width=True)
             
-            options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in donnees_globales}
-            creneaux_a_supprimer = st.multiselect("Supprimer des créneaux :", list(options_suppression.keys()))
-            if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
-                for sel in creneaux_a_supprimer: 
-                    supprimer_entree(options_suppression[sel])
-                st.rerun()
+            # Nettoyage des colonnes obsolètes pour l'affichage
+            colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj"]
+            df = df.drop(columns=[c for c in colonnes_a_ignorer if c in df.columns])
+            
+            if not df.empty:
+                # Réorganisation des colonnes et tri alphabétique/chronologique
+                cols = df.columns.tolist()
+                first_cols = ['nom', 'jour', 'debut', 'fin']
+                first_cols = [c for c in first_cols if c in cols]
+                other_cols = [c for c in cols if c not in first_cols and c != 'id']
+                df = df[first_cols + other_cols]
+                
+                # Tri des données pour que tout soit groupé par joueur
+                df = df.sort_values(by=['nom', 'jour', 'debut']).reset_index(drop=True)
+                st.dataframe(df, use_container_width=True)
+                
+                st.markdown("### 🗑️ Suppression de créneaux")
+                
+                # NOUVEAU : Filtre par joueur pour la suppression
+                joueurs_liste = sorted(df['nom'].unique().tolist())
+                joueur_filtre = st.selectbox("1. Filtrer par joueur :", ["Tous"] + joueurs_liste)
+                
+                dispos_filtrees = [d for d in donnees_globales if joueur_filtre == "Tous" or d["nom"] == joueur_filtre]
+                options_suppression = {f"{d['nom']} | {d['jour']} {d['debut']}-{d['fin']}": d['id'] for d in dispos_filtrees}
+                
+                creneaux_a_supprimer = st.multiselect("2. Sélectionner les créneaux à supprimer :", list(options_suppression.keys()))
+                
+                if st.button("🗑️ Supprimer la sélection", type="primary") and creneaux_a_supprimer:
+                    for sel in creneaux_a_supprimer: 
+                        supprimer_entree(options_suppression[sel])
+                    st.rerun()
 
     with tab_force:
         st.subheader("Forcer des assignations manuelles")
@@ -714,9 +731,12 @@ if est_admin:
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
-        c_res, c_gap = st.columns(2)
+        c_res, c_gap, c_time = st.columns(3)
         with c_res: resolution = st.number_input("Résolution (min)", value=30, step=5)
         with c_gap: gap_rel_input = st.number_input("Tolérance Solveur (gapRel)", min_value=0.0, max_value=1.0, value=0.005, step=0.005, format="%.3f")
+        
+        # NOUVEAU : Contrôle du temps maximal alloué au solveur
+        with c_time: time_limit_input = st.number_input("Temps Max Solveur (sec)", min_value=60, value=600, step=60)
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
             if not donnees_globales:
@@ -724,10 +744,17 @@ if est_admin:
             else:
                 matrice = charger_matrice_affinites()
                 with st.spinner(f"Génération du planning avec contraintes dynamiques (Tolérance {gap_rel_input*100}%)..."):
+                    
+                    # Chronométrage du solveur
+                    start_time = time.time()
+                    
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_globales, resolution, 
-                        st.session_state.assignations_forcees, matrice, gap_rel=gap_rel_input
+                        st.session_state.assignations_forcees, matrice, gap_rel=gap_rel_input, time_limit=time_limit_input
                     )
+                    
+                    end_time = time.time()
+                    duree_resolution = end_time - start_time
                     
                     if planning_brut:
                         planning_complet = lisser_planning(planning_brut, donnees_globales, resolution)
@@ -737,14 +764,15 @@ if est_admin:
                     st.session_state.planning_complet = planning_complet
                     st.session_state.temps_totaux = temps_totaux
                     st.session_state.statut_solveur = statut_solveur
+                    st.session_state.duree_resolution = duree_resolution
 
         if 'planning_complet' in st.session_state and st.session_state.planning_complet:
             
             st.markdown("---")
             if st.session_state.statut_solveur == 'Optimal':
-                st.success(f"✅ **Statut Optimal (Marge de {gap_rel_input*100}%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime.")
+                st.success(f"✅ **Statut Optimal (Marge de {gap_rel_input*100}%)** : Le meilleur planning possible a été trouvé rapidement avec une tolérance mathématique minime. *(Temps de résolution : {st.session_state.duree_resolution:.2f}s)*")
             elif st.session_state.statut_solveur == 'Not Solved':
-                st.warning("⏱️ **Temps écoulé (10 min)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
+                st.warning(f"⏱️ **Temps écoulé ({time_limit_input} sec)** : Un excellent planning a été trouvé, mais le solveur a été coupé avant de pouvoir prouver que c'était le meilleur absolu.")
             else:
                 st.error(f"⚠️ Statut inhabituel du solveur : {st.session_state.statut_solveur}")
             
