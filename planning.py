@@ -223,6 +223,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             if not d_cible:
                 continue
 
+            # Règle des 24h Glissantes reste dépendante du créneau cible
             max_h_24h = d_cible.get("heures_max_jour", 6)
             max_slots_24h = int((max_h_24h * 60) / resolution)
             
@@ -483,10 +484,9 @@ if not est_admin:
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.markdown("#### 🎯 Paramètres du Joueur")
             
-            # --- LÉGENDE EXPLICATIVE ---
             st.info("ℹ️ **Légende des paramètres :**\n"
-                    "- 🌍 **Globaux** (appliqués à toute votre semaine) : *Limite Max* et *Max d'heures / Semaine*.\n"
-                    "- 📌 **Par créneau** (spécifiques à cette disponibilité) : *Tous les autres paramètres ci-dessous (rythme, repas, micro-session)*.")
+                    "- 🌍 **Globaux** (appliqués à toute la semaine) : *Limite Max* et *Max d'heures / Semaine*.\n"
+                    "- 📌 **Par créneau** (spécifiques à la dispo) : *Max 24h, rythme, repas, micro-session*.")
             
             limite_max = st.selectbox("Sélectionnez votre Limite Max (🌍 Global)", [250, 100, 50])
             
@@ -539,7 +539,8 @@ if not est_admin:
                         "nom": nom_joueur.strip(), "jour": j,
                         "debut": debut_str, "fin": fin_str,
                         "limite_max": limite_max,
-                        "t_max_affile": temps_max_affile, "t_min_base": creneau_min_base,
+                        "t_max_affile": temps_max_affile,
+                        "t_min_base": creneau_min_base,
                         "break_min_heavy": break_min_heavy,
                         "heures_max_hebdo": heures_max_hebdo,
                         "heures_max_jour": heures_max_jour,
@@ -607,30 +608,34 @@ if not est_admin:
         mes_dispos = [d for d in donnees_globales if d["nom"] == nom_joueur.strip()]
         
         if mes_dispos:
-            for d in mes_dispos:
-                col_info, col_btn = st.columns([5, 1])
+            # Tri des créneaux de l'utilisateur chronologiquement
+            ordre_jours_ui = {"Lundi":0, "Mardi":1, "Mercredi":2, "Jeudi":3, "Vendredi":4, "Samedi":5, "Dimanche":6}
+            mes_dispos_tries = sorted(mes_dispos, key=lambda d: (ordre_jours_ui.get(d['jour'], 7), d['debut']))
+
+            for d in mes_dispos_tries:
+                col_info, col_btn = st.columns([10, 1])
                 with col_info:
                     fin_affichee = "Minuit" if d['fin'] == "23:59" else d['fin']
-                    # Ligne principale : Jour et Heures
-                    st.markdown(f"**{d['jour']}** : {d['debut']} - {fin_affichee}")
                     
-                    # Détails organisés et clairs
-                    details_global = f"🌍 **Global** ➔ Limite: {d.get('limite_max', '-')} | Hebdo: {d.get('heures_max_hebdo', '-')}h"
-                    details_rythme = f"📌 **Rythme** ➔ 24H: {d.get('heures_max_jour', '-')}h | Max continu: {d.get('t_max_affile', '-')}m | Min: {d.get('t_min_base', '-')}m | Break: {d.get('break_min_heavy', '-')}m"
+                    # Construction d'une seule ligne compacte
+                    parts = [
+                        f"**{d['jour']} {d['debut']}-{fin_affichee}**",
+                        f"💰 L{d.get('limite_max', '-')}",
+                        f"⏱️ {d.get('heures_max_hebdo', '-')}h/sem",
+                        f"24H: {d.get('heures_max_jour', '-')}h",
+                        f"Max: {d.get('t_max_affile', '-')}m",
+                        f"Min: {d.get('t_min_base', '-')}m",
+                        f"Brk: {d.get('break_min_heavy', '-')}m"
+                    ]
                     
-                    details_opt = []
                     if d.get('repas_duree', 0) > 0:
-                        details_opt.append(f"🍔 Repas: {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})")
+                        parts.append(f"🍔 {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})")
                     if d.get('micro_session_ok', False):
-                        details_opt.append("⚡ Micro-session: Oui")
-                    
-                    st.caption(details_global)
-                    st.caption(details_rythme)
-                    if details_opt:
-                        st.caption("📌 **Options** ➔ " + " | ".join(details_opt))
+                        parts.append("⚡ Micro: Oui")
                         
+                    st.markdown(" | ".join(parts))
+                
                 with col_btn:
-                    st.write("")
                     if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
                         st.rerun()
