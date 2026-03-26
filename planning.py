@@ -486,7 +486,7 @@ if not est_admin:
             
             st.info("ℹ️ **Légende des paramètres :**\n"
                     "- 🌍 **Globaux** (appliqués à toute la semaine) : *Limite Max* et *Max d'heures / Semaine*.\n"
-                    "- 📌 **Par créneau** (spécifiques à la dispo) : *Tout les autres paramètres*.")
+                    "- 📌 **Par créneau** (spécifiques à la dispo) : *Tous les autres paramètres*.")
             
             limite_max = st.selectbox("Sélectionnez votre Limite Max (🌍 Global)", [250, 100, 50])
             
