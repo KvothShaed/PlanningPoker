@@ -1,10 +1,11 @@
 import streamlit as st
+import streamlit.components.v1 as components # NOUVEAU : Pour le chronomètre en JavaScript
 import pandas as pd
 import uuid
 import pulp
 import altair as alt
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo # NOUVEAU : Pour forcer le fuseau horaire français
+from zoneinfo import ZoneInfo
 import colorsys
 import gspread
 from google.oauth2.service_account import Credentials
@@ -25,7 +26,7 @@ if 'assignations_forcees' not in st.session_state:
 # GESTION DU TEMPS ET DE LA DEADLINE
 # ==========================================
 def get_planning_context():
-    # On force l'heure de Paris pour éviter les bugs de serveur hébergé à l'étranger
+    # On force l'heure de Paris pour éviter les bugs de serveur
     tz = ZoneInfo("Europe/Paris")
     now = datetime.now(tz)
     
@@ -105,7 +106,6 @@ def sauvegarder_matrice_affinites(data):
     charger_matrice_affinites.clear()
 
 def publier_planning_officiel(planning_data, resolution, visible=True, annee=target_year, semaine=target_week):
-    # On sauvegarde le planning officiel avec une clé unique pour l'année et la semaine
     doc_id = f"officiel_{annee}_S{semaine}"
     db.collection('plannings').document(doc_id).set({
         "donnees": planning_data,
@@ -439,7 +439,6 @@ with st.sidebar:
     mot_de_passe = st.text_input("Mot de passe", type="password")
     est_admin = (mot_de_passe == "Romarino7") 
     
-    # NOUVEAU : Sélecteur de semaine pour l'admin
     if est_admin:
         st.markdown("---")
         st.header("📅 Navigation Semaines")
@@ -455,35 +454,34 @@ if not est_admin:
         st.markdown(f"### Bienvenue {nom_joueur} !")
         st.write(f"📅 **Préparation de la Semaine {target_week}** (Année {target_year})")
         
-        # --- LE CHRONOMÈTRE JS ---
+        # --- LE CHRONOMÈTRE JS (COMPOSANT HTML) ---
         if not is_locked:
             compte_a_rebours_html = f"""
-            <div style="padding: 15px; border-radius: 8px; background-color: #e8f5e9; border: 1px solid #c8e6c9; color: #2e7d32; text-align: center; font-size: 18px; margin-bottom: 20px;">
+            <div style="padding: 15px; border-radius: 8px; background-color: #e8f5e9; border: 1px solid #c8e6c9; color: #2e7d32; text-align: center; font-size: 18px; font-family: sans-serif;">
                 ⏳ <b>Clôture des dispos (Samedi 12h00) :</b> <span id="countdown" style="font-weight: bold; font-family: monospace;"></span>
-                <script>
-                    var countDownDate = new Date("{deadline_dt.isoformat()}").getTime();
-                    var x = setInterval(function() {{
-                        var now = new Date().getTime();
-                        var distance = countDownDate - now;
-                        if (distance < 0) {{
-                            clearInterval(x);
-                            document.getElementById("countdown").innerHTML = "EXPIRÉE";
-                        }} else {{
-                            var days = Math.floor(distance / (1000 * 60 * 60 * 24));
-                            var hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                            var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                            var seconds = Math.floor((distance % (1000 * 60)) / 1000);
-                            document.getElementById("countdown").innerHTML = days + "j " + hours + "h " + minutes + "m " + seconds + "s";
-                        }}
-                    }}, 1000);
-                </script>
             </div>
+            <script>
+                var countDownDate = new Date("{deadline_dt.isoformat()}").getTime();
+                var x = setInterval(function() {{
+                    var now = new Date().getTime();
+                    var distance = countDownDate - now;
+                    if (distance < 0) {{
+                        clearInterval(x);
+                        document.getElementById("countdown").innerHTML = "EXPIRÉE";
+                    }} else {{
+                        var days = Math.floor(distance / (1000 * 60 * 60 * 24));
+                        var hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                        var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                        var seconds = Math.floor((distance % (1000 * 60)) / 1000);
+                        document.getElementById("countdown").innerHTML = days + "j " + hours + "h " + minutes + "m " + seconds + "s";
+                    }}
+                }}, 1000);
+            </script>
             """
-            st.markdown(compte_a_rebours_html, unsafe_allow_html=True)
+            components.html(compte_a_rebours_html, height=75)
         else:
             st.error("🔒 **La deadline est dépassée.** Le formulaire est verrouillé pendant que l'algorithme génère le planning. Vous pourrez entrer vos prochaines disponibilités dès Lundi !")
 
-        # On cache le formulaire si la deadline est dépassée
         if not is_locked:
             with st.form("formulaire_dispo", clear_on_submit=False):
                 st.markdown("#### 🎯 Paramètres du Joueur")
@@ -533,9 +531,7 @@ if not est_admin:
                 st.write("Un changement de rythme ou de repas ? Appliquez vos paramètres actuels à tous vos créneaux existants d'un coup.")
                 btn_mettre_a_jour = st.form_submit_button("Mettre à jour tous mes anciens créneaux", type="secondary")
 
-            # --- GESTION DES BOUTONS DE SOUVEGARDE ---
             if btn_ajouter:
-                # Double sécurité anti-fraude temporelle :
                 if datetime.now(ZoneInfo("Europe/Paris")) >= deadline_dt:
                     st.error("⏳ Deadline dépassée à l'instant, enregistrement annulé.")
                 elif not jours_choisis:
@@ -556,7 +552,7 @@ if not est_admin:
                             "repas_debut": repas_debut,
                             "repas_fin": repas_fin,
                             "repas_duree": repas_duree,
-                            "semaine_cible": target_week, # NOUVEAU: Le tampon temporel
+                            "semaine_cible": target_week, 
                             "annee_cible": target_year
                         }
                         ajouter_dispo(nouvelle_dispo)
@@ -567,7 +563,6 @@ if not est_admin:
                 if datetime.now(ZoneInfo("Europe/Paris")) >= deadline_dt:
                     st.error("⏳ Deadline dépassée.")
                 else:
-                    # Ne met à jour que la semaine cible
                     creneaux_joueur = [d for d in donnees_globales if d["nom"] == nom_joueur.strip() and d.get('semaine_cible', target_week) == target_week and d.get('annee_cible', target_year) == target_year]
                     if not creneaux_joueur:
                         st.warning(f"Vous n'avez aucun créneau enregistré pour la semaine {target_week} à mettre à jour.")
@@ -617,7 +612,6 @@ if not est_admin:
         st.markdown("---")
         st.subheader(f"Vos disponibilités (Semaine {target_week})")
         
-        # Filtre d'affichage uniquement sur la semaine cible
         mes_dispos = [d for d in donnees_globales if d["nom"] == nom_joueur.strip() and d.get('semaine_cible', target_week) == target_week and d.get('annee_cible', target_year) == target_year]
         
         if mes_dispos:
@@ -645,7 +639,6 @@ if not est_admin:
                     st.markdown(" | ".join(parts))
                 
                 with col_btn:
-                    # Ne permet la suppression que si la deadline n'est pas passée
                     if not is_locked:
                         if st.button("❌", key=d["id"]):
                             supprimer_entree(d["id"])
@@ -657,7 +650,6 @@ if not est_admin:
 if est_admin:
     st.success(f"Mode Administrateur activé - Vous gérez la Semaine {admin_semaine} ({admin_annee})")
     
-    # NOUVEAU : On filtre drastiquement toutes les données de l'Admin selon la semaine sélectionnée
     donnees_semaine = [d for d in donnees_globales if d.get('semaine_cible', target_week) == admin_semaine and d.get('annee_cible', target_year) == admin_annee]
     noms_dispos = list(set([d["nom"] for d in donnees_semaine])) if donnees_semaine else []
     
@@ -781,7 +773,6 @@ if est_admin:
                 with st.spinner(f"Génération du planning avec contraintes dynamiques (Tolérance {gap_rel_input*100}%)..."):
                     
                     start_time = time.time()
-                    # On envoie QUE les données de la semaine sélectionnée au solveur
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
                         donnees_semaine, resolution, 
                         st.session_state.assignations_forcees, matrice, gap_rel=gap_rel_input, time_limit=time_limit_input
