@@ -306,7 +306,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         if c_cible in creneaux_globaux and force['nom'] in joueurs:
             prob += X[force['nom'], force['planning'], c_cible] == 1, f"Force_{force['nom']}_{c_cible}"
 
-    # L'appel au solveur inclut maintenant la variable time_limit
     prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit, gapRel=gap_rel))
     
     planning_final = []
@@ -565,7 +564,6 @@ if not est_admin:
                         d["repas_debut"] = repas_debut
                         d["repas_fin"] = repas_fin
                         d["repas_duree"] = repas_duree
-                        # Nettoyage des vieilles variables fantômes
                         for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
                             if old_key in d: del d[old_key]
                             
@@ -605,11 +603,20 @@ if not est_admin:
         
         if mes_dispos:
             for d in mes_dispos:
-                col_info, col_btn = st.columns([4, 1])
+                col_info, col_btn = st.columns([5, 1])
                 with col_info:
                     fin_affichee = "Minuit" if d['fin'] == "23:59" else d['fin']
-                    st.write(f"**{d['jour']}** : {d['debut']} - {fin_affichee} *(Limite: {d.get('limite_max', 'Non définie')})*")
+                    st.markdown(f"**{d['jour']}** : {d['debut']} - {fin_affichee} &nbsp;|&nbsp; 💰 Limite : **{d.get('limite_max', 'Non définie')}**")
+                    
+                    details = f"⏱️ Hebdo: {d.get('heures_max_hebdo', '-')}h | 24H: {d.get('heures_max_jour', '-')}h | Max: {d.get('t_max_affile', '-')}m | Min: {d.get('t_min_base', '-')}m | Break: {d.get('break_min_heavy', '-')}m"
+                    if d.get('repas_duree', 0) > 0:
+                        details += f" | 🍔 Repas: {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})"
+                    if d.get('micro_session_ok'):
+                        details += " | ⚡ Micro: Oui"
+                        
+                    st.caption(details)
                 with col_btn:
+                    st.write("") # Espace pour aligner le bouton avec le texte
                     if st.button("❌", key=d["id"]):
                         supprimer_entree(d["id"])
                         st.rerun()
@@ -644,8 +651,14 @@ if est_admin:
             if not df.empty:
                 # Réorganisation des colonnes et tri alphabétique/chronologique
                 cols = df.columns.tolist()
-                first_cols = ['nom', 'jour', 'debut', 'fin']
-                first_cols = [c for c in first_cols if c in cols]
+                first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'micro_session_ok', 'repas_debut', 'repas_fin', 'repas_duree']
+                
+                # S'assurer que toutes les colonnes cibles existent même si des anciens créneaux n'ont pas la donnée
+                for fc in first_cols:
+                    if fc not in df.columns:
+                        df[fc] = None
+                        
+                first_cols = [c for c in first_cols if c in df.columns]
                 other_cols = [c for c in cols if c not in first_cols and c != 'id']
                 df = df[first_cols + other_cols]
                 
@@ -735,7 +748,6 @@ if est_admin:
         with c_res: resolution = st.number_input("Résolution (min)", value=30, step=5)
         with c_gap: gap_rel_input = st.number_input("Tolérance Solveur (gapRel)", min_value=0.0, max_value=1.0, value=0.005, step=0.005, format="%.3f")
         
-        # NOUVEAU : Contrôle du temps maximal alloué au solveur
         with c_time: time_limit_input = st.number_input("Temps Max Solveur (sec)", min_value=60, value=600, step=60)
 
         if st.button("🚀 Résoudre la semaine entière", type="primary"):
@@ -745,7 +757,6 @@ if est_admin:
                 matrice = charger_matrice_affinites()
                 with st.spinner(f"Génération du planning avec contraintes dynamiques (Tolérance {gap_rel_input*100}%)..."):
                     
-                    # Chronométrage du solveur
                     start_time = time.time()
                     
                     planning_brut, temps_totaux, statut_solveur = optimiser_planning_hebdo(
