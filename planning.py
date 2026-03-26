@@ -185,7 +185,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         prob += Max_Temps >= Temps_Total[j], f"Def_Max_{j}"
         prob += Min_Temps <= Temps_Total[j], f"Def_Min_{j}"
 
-        # Seul le paramètre Hebdomadaire reste 100% global au joueur (lu sur la dernière donnée enregistrée)
+        # Paramètre Hebdomadaire Global
         d_joueur = dict_joueurs.get(j)
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
@@ -212,13 +212,12 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                         elif len(creneaux_fenetre) > 0:
                             prob += pulp.lpSum(Y[j, c] for c in creneaux_fenetre) == 0, f"RepasBlock_{j}_{jour}_{r_debut}"
 
-        # ⚙️ RÈGLES DE RYTHME (100% Dynamiques par créneau)
+        # ⚙️ RÈGLES DE RYTHME (Dynamiques par créneau)
         for i in range(len(creneaux_globaux)):
             c_val = creneaux_globaux[i]
             jour_c, h_str = c_val.split("_")
             dispos_j = dict_dispos_jour.get(f"{j}_{jour_c}", [])
             
-            # Recherche des paramètres EXACTS pour le créneau visé
             d_cible = next((d for d in dispos_j if d["debut"] <= h_str < (d["fin"] if d["fin"] != "23:59" else "24:00")), None)
             
             if not d_cible:
@@ -232,12 +231,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             break_slots = int(d_cible.get("break_min_heavy", 30) / resolution) 
             autorise_micro = d_cible.get("micro_session_ok", False)
 
-            # Règle des 24h Glissantes
             fenetre_24 = min(slots_dans_24h, len(creneaux_globaux) - i)
             if fenetre_24 > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_24)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
-            # Temps Max Affilé & Temps de Break Heavy
             if max_slots > 0 and break_slots > 0:
                 fenetre_break = max_slots + break_slots
                 if i + fenetre_break <= len(creneaux_globaux):
@@ -246,7 +243,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                 if i + max_slots < len(creneaux_globaux):
                     prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
 
-            # Temps Minimum par Session (avec astuce micro-session)
             if min_slots > 1 and i + min_slots <= len(creneaux_globaux):
                 if i == 0:
                     start_var = Y[j, creneaux_globaux[0]]
@@ -258,9 +254,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                 for k in range(1, min_slots):
                     prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
-    # ==========================================
-    # RÈGLE DE RYTHME : INTERDICTION PAUSE MOYENNE (AVEC RESET)
-    # ==========================================
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
     
@@ -489,19 +482,25 @@ if not est_admin:
         
         with st.form("formulaire_dispo", clear_on_submit=False):
             st.markdown("#### 🎯 Paramètres du Joueur")
-            limite_max = st.selectbox("Sélectionnez votre Limite Max", [250, 100, 50])
+            
+            # --- LÉGENDE EXPLICATIVE ---
+            st.info("ℹ️ **Légende des paramètres :**\n"
+                    "- 🌍 **Globaux** (appliqués à toute votre semaine) : *Limite Max* et *Max d'heures / Semaine*.\n"
+                    "- 📌 **Par créneau** (spécifiques à cette disponibilité) : *Tous les autres paramètres ci-dessous (rythme, repas, micro-session)*.")
+            
+            limite_max = st.selectbox("Sélectionnez votre Limite Max (🌍 Global)", [250, 100, 50])
             
             st.markdown("#### ⚙️ Contraintes de rythme")
             c_h, c_j = st.columns(2)
-            with c_h: heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE", value=100, step=1)
-            with c_j: heures_max_jour = st.number_input("Maximum d'heures / 24H (Glissant)", value=6, step=1)
+            with c_h: heures_max_hebdo = st.number_input("Maximum d'heures / SEMAINE (🌍 Global)", value=100, step=1)
+            with c_j: heures_max_jour = st.number_input("Maximum d'heures / 24H (Glissant) (📌)", value=6, step=1)
             
             c1, c2 = st.columns(2)
             with c1:
-                temps_max_affile = st.number_input("Max temps d'affilée (min)", value=120, step=30)
-                creneau_min_base = st.number_input("Temps minimum par session", value=60, step=30)
+                temps_max_affile = st.number_input("Max temps d'affilée (min) (📌)", value=120, step=30)
+                creneau_min_base = st.number_input("Temps minimum par session (📌)", value=60, step=30)
             with c2: 
-                break_min_heavy = st.number_input("Pause min après grosse session", value=60, step=15)
+                break_min_heavy = st.number_input("Pause min après grosse session (📌)", value=60, step=15)
 
             st.markdown("#### ⚡ Exception : Micro-session")
             micro_session_ok = st.checkbox("Autoriser une session courte (30min) à la suite d'un break court (30 min)", value=True)
@@ -612,15 +611,24 @@ if not est_admin:
                 col_info, col_btn = st.columns([5, 1])
                 with col_info:
                     fin_affichee = "Minuit" if d['fin'] == "23:59" else d['fin']
-                    st.markdown(f"**{d['jour']}** : {d['debut']} - {fin_affichee} &nbsp;|&nbsp; 💰 Limite : **{d.get('limite_max', 'Non définie')}**")
+                    # Ligne principale : Jour et Heures
+                    st.markdown(f"**{d['jour']}** : {d['debut']} - {fin_affichee}")
                     
-                    details = f"⏱️ Hebdo: {d.get('heures_max_hebdo', '-')}h | 24H: {d.get('heures_max_jour', '-')}h | Max: {d.get('t_max_affile', '-')}m | Min: {d.get('t_min_base', '-')}m | Break: {d.get('break_min_heavy', '-')}m"
+                    # Détails organisés et clairs
+                    details_global = f"🌍 **Global** ➔ Limite: {d.get('limite_max', '-')} | Hebdo: {d.get('heures_max_hebdo', '-')}h"
+                    details_rythme = f"📌 **Rythme** ➔ 24H: {d.get('heures_max_jour', '-')}h | Max continu: {d.get('t_max_affile', '-')}m | Min: {d.get('t_min_base', '-')}m | Break: {d.get('break_min_heavy', '-')}m"
+                    
+                    details_opt = []
                     if d.get('repas_duree', 0) > 0:
-                        details += f" | 🍔 Repas: {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})"
-                    if d.get('micro_session_ok'):
-                        details += " | ⚡ Micro: Oui"
+                        details_opt.append(f"🍔 Repas: {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})")
+                    if d.get('micro_session_ok', False):
+                        details_opt.append("⚡ Micro-session: Oui")
+                    
+                    st.caption(details_global)
+                    st.caption(details_rythme)
+                    if details_opt:
+                        st.caption("📌 **Options** ➔ " + " | ".join(details_opt))
                         
-                    st.caption(details)
                 with col_btn:
                     st.write("")
                     if st.button("❌", key=d["id"]):
