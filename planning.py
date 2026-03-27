@@ -74,7 +74,6 @@ def supprimer_entree(id_entree):
     db.collection('dispos').document(id_entree).delete()
     charger_donnees.clear()
 
-# NOUVELLE FONCTION SÉCURISÉE DE SUPPRESSION PAR SEMAINE
 def vider_dispos_semaine(annee, semaine):
     docs = db.collection('dispos').stream()
     batch = db.batch()
@@ -191,8 +190,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
     X = pulp.LpVariable.dicts("Assign", ((j, p, c) for j in joueurs for p in PLANNINGS_DISPOS for c in creneaux_globaux), cat='Binary')
     Y = pulp.LpVariable.dicts("Joue", ((j, c) for j in joueurs for c in creneaux_globaux), cat='Binary')
 
-    Joue_Jour = pulp.LpVariable.dicts("JoueJour", ((j, jour) for j in joueurs for jour in jours_semaine), cat='Binary')
-
     Temps_Total = pulp.LpVariable.dicts("TempsTotalHebdo", joueurs, lowBound=0, cat='Integer')
     Max_Temps = pulp.LpVariable("MaxTempsHebdo", lowBound=0, cat='Integer')
     Min_Temps = pulp.LpVariable("MinTempsHebdo", lowBound=0, cat='Integer')
@@ -210,12 +207,7 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
         max_h_hebdo = d_joueur.get("heures_max_hebdo", 100)
         prob += Temps_Total[j] <= int((max_h_hebdo * 60) / resolution), f"Limite_Heures_Hebdo_{j}"
 
-        jours_off = d_joueur.get("jours_off", 0)
-        prob += pulp.lpSum(Joue_Jour[j, jour] for jour in jours_semaine) <= (7 - jours_off), f"Jours_Off_{j}"
-
         for jour, creneaux_j in creneaux_par_jour.items():
-            prob += pulp.lpSum(Y[j, c] for c in creneaux_j) <= len(creneaux_j) * Joue_Jour[j, jour], f"Lien_JoueJour_{j}_{jour}"
-            
             dispos_j = dict_dispos_jour.get(f"{j}_{jour}", [])
             repas_vus = set()
             for d_jour_data in dispos_j:
@@ -498,12 +490,10 @@ if not est_admin:
                 st.markdown("#### 🎯 Paramètres du Joueur")
                 
                 st.info("ℹ️ **Légende des paramètres :**\n"
-                        "- 🌍 **Globaux** (appliqués à toute la semaine) : *Limite Max*, *Max d'heures / Semaine* et *Jours de repos*.\n"
+                        "- 🌍 **Globaux** (appliqués à toute la semaine) : *Limite Max* et *Max d'heures / Semaine*.\n"
                         "- 📌 **Par créneau** (spécifiques à la dispo) : *Tous les autres paramètres*.")
                 
-                c_lim, c_off = st.columns(2)
-                with c_lim: limite_max = st.selectbox("Sélectionnez votre Limite Max (🌍 Global)", [250, 100, 50])
-                with c_off: jours_off = st.number_input("Jours de repos (Day Off) souhaités / SEMAINE (🌍)", value=0, min_value=0, max_value=6, step=1)
+                limite_max = st.selectbox("Sélectionnez votre Limite Max (🌍 Global)", [250, 100, 50])
                 
                 st.markdown("#### ⚙️ Contraintes de rythme")
                 c_h, c_j = st.columns(2)
@@ -552,11 +542,9 @@ if not est_admin:
                 else:
                     jours_semaine_ref = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
                     for j in jours_choisis:
-                        # Création du dictionnaire de base avec les paramètres communs
                         base_dispo = {
                             "nom": nom_joueur.strip(),
                             "limite_max": limite_max,
-                            "jours_off": jours_off,
                             "t_max_affile": temps_max_affile,
                             "t_min_base": creneau_min_base,
                             "break_min_heavy": break_min_heavy,
@@ -572,7 +560,6 @@ if not est_admin:
 
                         # DÉCOUPEUR AUTOMATIQUE DE MINUIT
                         if debut_str > fin_str and fin_str != "00:00":
-                            # 1. Première partie : du début jusqu'à 23:59 le jour même
                             dispo_1 = base_dispo.copy()
                             dispo_1["id"] = str(uuid.uuid4())
                             dispo_1["jour"] = j
@@ -580,8 +567,6 @@ if not est_admin:
                             dispo_1["fin"] = "23:59"
                             ajouter_dispo(dispo_1)
                             
-                            # 2. Deuxième partie : de 00:00 jusqu'à la fin, le lendemain
-                            # 🛑 FIX : On IGNORE la partie qui déborde si c'est la nuit du Dimanche au Lundi
                             if j != "Dimanche":
                                 idx_jour = jours_semaine_ref.index(j)
                                 jour_suivant = jours_semaine_ref[(idx_jour + 1) % 7]
@@ -594,7 +579,6 @@ if not est_admin:
                                 ajouter_dispo(dispo_2)
                             
                         else:
-                            # Cas normal : pas de passage de minuit
                             dispo_normale = base_dispo.copy()
                             dispo_normale["id"] = str(uuid.uuid4())
                             dispo_normale["jour"] = j
@@ -616,7 +600,6 @@ if not est_admin:
                         with st.spinner("Mise à jour en cours..."):
                             for d in creneaux_joueur:
                                 d["limite_max"] = limite_max
-                                d["jours_off"] = jours_off
                                 d["heures_max_hebdo"] = heures_max_hebdo
                                 d["heures_max_jour"] = heures_max_jour
                                 d["t_max_affile"] = temps_max_affile
@@ -682,7 +665,6 @@ if not est_admin:
                     parts = [
                         f"**{d['jour']} {d['debut']}-{fin_affichee}**",
                         f"💰 L{d.get('limite_max', '-')}",
-                        f"🛌 Off: {d.get('jours_off', 0)}j",
                         f"⏱️ {d.get('heures_max_hebdo', '-')}h/s",
                         f"24H: {d.get('heures_max_jour', '-')}h",
                         f"Max: {d.get('t_max_affile', '-')}m",
@@ -730,7 +712,7 @@ if est_admin:
             
             if not df.empty:
                 cols = df.columns.tolist()
-                first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'jours_off', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'micro_session_ok', 'repas_debut', 'repas_fin', 'repas_duree']
+                first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'micro_session_ok', 'repas_debut', 'repas_fin', 'repas_duree']
                 
                 for fc in first_cols:
                     if fc not in df.columns: df[fc] = None
