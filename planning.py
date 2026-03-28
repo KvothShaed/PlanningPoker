@@ -18,45 +18,76 @@ from firebase_admin import credentials, firestore
 st.set_page_config(page_title="Planning Optimisé & Multisites", layout="wide")
 
 PLANNINGS_DISPOS = ["Planning 250", "Planning 100", "Planning 50"]
+JOURS_SEMAINE_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
 if 'assignations_forcees' not in st.session_state:
     st.session_state.assignations_forcees = []
 
 # ==========================================
-# GESTION DU TEMPS ET DE LA DEADLINE
-# ==========================================
-def get_planning_context():
-    tz = ZoneInfo("Europe/Paris")
-    now = datetime.now(tz)
-    
-    current_year, current_week, _ = now.isocalendar()
-    
-    current_weekday = now.weekday() # 0 = Lundi, 5 = Samedi
-    
-    days_to_saturday = 5 - current_weekday
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    saturday_noon = today_start + timedelta(days=days_to_saturday, hours=12)
-    
-    if now < saturday_noon:
-        is_locked = False
-        target_date = now + timedelta(days=7) 
-    else:
-        is_locked = True
-        target_date = saturday_noon + timedelta(days=7) 
-        
-    target_year, target_week, _ = target_date.isocalendar()
-    return current_year, current_week, target_year, target_week, saturday_noon, is_locked, now
-
-current_year, current_week, target_year, target_week, deadline_dt, is_locked, now_local = get_planning_context()
-
-# ==========================================
-# INITIALISATION DE FIREBASE
+# INITIALISATION DE FIREBASE (Déplacé en haut)
 # ==========================================
 if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
+
+# ==========================================
+# GESTION DE LA CONFIGURATION
+# ==========================================
+@st.cache_data(ttl=60)
+def charger_matrice_affinites():
+    doc = db.collection('config').document('affinites').get()
+    if doc.exists:
+        return doc.to_dict()
+    return {
+        "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
+        "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
+        "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
+        "pause_interdite_min": 6,
+        "repos_nuit_min": 10,
+        "deadline_day": 5, # 5 = Samedi par défaut
+        "deadline_hour": 12,
+        "deadline_minute": 0
+    }
+
+config_admin = charger_matrice_affinites()
+
+def sauvegarder_matrice_affinites(data):
+    db.collection('config').document('affinites').set(data)
+    charger_matrice_affinites.clear()
+
+# ==========================================
+# GESTION DU TEMPS ET DE LA DEADLINE DYNAMIQUE
+# ==========================================
+def get_planning_context(config):
+    tz = ZoneInfo("Europe/Paris")
+    now = datetime.now(tz)
+    
+    current_year, current_week, _ = now.isocalendar()
+    current_weekday = now.weekday() 
+    
+    dead_day = config.get("deadline_day", 5)
+    dead_hour = config.get("deadline_hour", 12)
+    dead_min = config.get("deadline_minute", 0)
+    
+    days_to_deadline = dead_day - current_weekday
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Calcul de la deadline exacte pour la semaine en cours
+    deadline_dt = today_start + timedelta(days=days_to_deadline, hours=dead_hour, minutes=dead_min)
+    
+    if now < deadline_dt:
+        is_locked = False
+        target_date = now + timedelta(days=7) 
+    else:
+        is_locked = True
+        target_date = deadline_dt + timedelta(days=7) 
+        
+    target_year, target_week, _ = target_date.isocalendar()
+    return current_year, current_week, target_year, target_week, deadline_dt, is_locked, now
+
+current_year, current_week, target_year, target_week, deadline_dt, is_locked, now_local = get_planning_context(config_admin)
 
 # ==========================================
 # GESTION DES DONNÉES (CLOUD FIRESTORE)
@@ -89,23 +120,6 @@ def vider_dispos_semaine(annee, semaine):
     if count % 500 != 0:
         batch.commit()
     charger_donnees.clear()
-
-@st.cache_data(ttl=300)
-def charger_matrice_affinites():
-    doc = db.collection('config').document('affinites').get()
-    if doc.exists:
-        return doc.to_dict()
-    return {
-        "250": {"Planning 250": 3, "Planning 100": 3, "Planning 50": 3},
-        "100": {"Planning 250": 1, "Planning 100": 3, "Planning 50": 3},
-        "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
-        "pause_interdite_min": 6,
-        "repos_nuit_min": 10
-    }
-
-def sauvegarder_matrice_affinites(data):
-    db.collection('config').document('affinites').set(data)
-    charger_matrice_affinites.clear()
 
 def publier_planning_officiel(planning_data, resolution, visible=True, annee=target_year, semaine=target_week):
     doc_id = f"officiel_{annee}_S{semaine}"
@@ -258,7 +272,6 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     start_var = Y[j, creneaux_globaux[0]]
                 else:
                     start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
-                    # 🛑 CORRECTIF MICRO-SESSION : On vérifie l'état juste avant la pause de 30 min.
                     slots_30m = int(30 / resolution)
                     if autorise_micro and i >= slots_30m + 1:
                         start_var -= Y[j, creneaux_globaux[i - slots_30m - 1]]
@@ -458,11 +471,14 @@ if not est_admin:
         st.markdown(f"### Bienvenue {nom_joueur} !")
         st.write(f"📅 **Préparation de la Semaine {target_week}** (Année {target_year})")
         
-        # --- LE CHRONOMÈTRE JS (DESIGN SOMBRE) ---
+        # --- LE CHRONOMÈTRE JS (DYNAMIQUE) ---
         if not is_locked:
+            nom_jour_deadline = JOURS_SEMAINE_FR[config_admin.get("deadline_day", 5)]
+            heure_formattee = f"{config_admin.get('deadline_hour', 12):02d}h{config_admin.get('deadline_minute', 0):02d}"
+            
             compte_a_rebours_html = f"""
             <div style="padding: 15px; border-radius: 8px; background-color: #1E1E1E; border: 1px solid #444444; color: #FFFFFF; text-align: center; font-size: 18px; font-family: sans-serif;">
-                ⏳ <b>Clôture des dispos (Samedi 12h00) :</b> <span id="countdown" style="font-weight: bold; font-family: monospace; color: #4CAF50;"></span>
+                ⏳ <b>Clôture des dispos ({nom_jour_deadline} {heure_formattee}) :</b> <span id="countdown" style="font-weight: bold; font-family: monospace; color: #4CAF50;"></span>
             </div>
             <script>
                 var countDownDate = new Date("{deadline_dt.isoformat()}").getTime();
@@ -760,40 +776,54 @@ if est_admin:
 
     with tab_param:
         st.subheader("Matrice des Affinités et Pauses")
-        affinites_admin = charger_matrice_affinites()
         
         with st.form("form_affinites"):
             st.markdown("**Pour les joueurs avec Limite Max = 250 :**")
             col_a1, col_b1, col_c1 = st.columns(3)
-            with col_a1: val_250_250 = st.slider("Planning 250", 1, 5, affinites_admin.get("250", {}).get("Planning 250", 3), key="s_250_250")
-            with col_b1: val_100_250 = st.slider("Planning 100", 1, 5, affinites_admin.get("250", {}).get("Planning 100", 3), key="s_100_250")
-            with col_c1: val_50_250 = st.slider("Planning 50", 1, 5, affinites_admin.get("250", {}).get("Planning 50", 3), key="s_50_250")
-            affinites_admin["250"] = {"Planning 250": val_250_250, "Planning 100": val_100_250, "Planning 50": val_50_250}
+            with col_a1: val_250_250 = st.slider("Planning 250", 1, 5, config_admin.get("250", {}).get("Planning 250", 3), key="s_250_250")
+            with col_b1: val_100_250 = st.slider("Planning 100", 1, 5, config_admin.get("250", {}).get("Planning 100", 3), key="s_100_250")
+            with col_c1: val_50_250 = st.slider("Planning 50", 1, 5, config_admin.get("250", {}).get("Planning 50", 3), key="s_50_250")
+            config_admin["250"] = {"Planning 250": val_250_250, "Planning 100": val_100_250, "Planning 50": val_50_250}
             
             st.markdown("**Pour les joueurs avec Limite Max = 100 :**")
             col_a2, col_b2 = st.columns(2)
-            with col_a2: val_100_100 = st.slider("Planning 100", 1, 5, affinites_admin.get("100", {}).get("Planning 100", 3), key="s_100_100")
-            with col_b2: val_50_100 = st.slider("Planning 50", 1, 5, affinites_admin.get("100", {}).get("Planning 50", 3), key="s_50_100")
-            affinites_admin["100"] = {"Planning 250": 1, "Planning 100": val_100_100, "Planning 50": val_50_100}
+            with col_a2: val_100_100 = st.slider("Planning 100", 1, 5, config_admin.get("100", {}).get("Planning 100", 3), key="s_100_100")
+            with col_b2: val_50_100 = st.slider("Planning 50", 1, 5, config_admin.get("100", {}).get("Planning 50", 3), key="s_50_100")
+            config_admin["100"] = {"Planning 250": 1, "Planning 100": val_100_100, "Planning 50": val_50_100}
 
             st.markdown("**Pour les joueurs avec Limite Max = 50 :**")
-            val_50_50 = st.slider("Planning 50", 1, 5, affinites_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
-            affinites_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
+            val_50_50 = st.slider("Planning 50", 1, 5, config_admin.get("50", {}).get("Planning 50", 3), key="s_50_50")
+            config_admin["50"] = {"Planning 250": 1, "Planning 100": 1, "Planning 50": val_50_50}
 
             st.markdown("---")
             st.markdown("**🛌 Paramètres des Cycles de Repos :**")
             c_p1, c_p2 = st.columns(2)
-            with c_p1: pause_interdite = st.number_input("Début Zone Interdite (Max pause courte)", value=affinites_admin.get("pause_interdite_min", 6), step=1)
-            with c_p2: repos_nuit = st.number_input("Fin Zone Interdite (Vraie nuit min)", value=affinites_admin.get("repos_nuit_min", 10), step=1)
+            with c_p1: pause_interdite = st.number_input("Début Zone Interdite (Max pause courte)", value=config_admin.get("pause_interdite_min", 6), step=1)
+            with c_p2: repos_nuit = st.number_input("Fin Zone Interdite (Vraie nuit min)", value=config_admin.get("repos_nuit_min", 10), step=1)
                 
-            affinites_admin["pause_interdite_min"] = pause_interdite
-            affinites_admin["repos_nuit_min"] = repos_nuit
+            config_admin["pause_interdite_min"] = pause_interdite
+            config_admin["repos_nuit_min"] = repos_nuit
+
+            st.markdown("---")
+            st.markdown("### ⏳ Deadline des Disponibilités")
+            st.info("Sélectionnez le jour et l'heure à partir desquels les joueurs ne pourront plus modifier leurs horaires pour la semaine suivante.")
+            col_d1, col_d2, col_d3 = st.columns(3)
+            with col_d1: new_dead_day = st.selectbox("Jour de clôture", range(7), format_func=lambda x: JOURS_SEMAINE_FR[x], index=config_admin.get("deadline_day", 5))
+            with col_d2: new_dead_hour = st.number_input("Heure", min_value=0, max_value=23, value=config_admin.get("deadline_hour", 12))
+            with col_d3: new_dead_min = st.number_input("Minute", min_value=0, max_value=59, step=15, value=config_admin.get("deadline_minute", 0))
+
+            config_admin["deadline_day"] = new_dead_day
+            config_admin["deadline_hour"] = new_dead_hour
+            config_admin["deadline_minute"] = new_dead_min
                 
             if st.form_submit_button("Enregistrer la configuration", type="primary"):
-                if pause_interdite >= repos_nuit: st.error("Le début de la zone interdite doit être strictement inférieur à la vraie nuit.")
+                if pause_interdite >= repos_nuit: 
+                    st.error("Le début de la zone interdite doit être strictement inférieur à la vraie nuit.")
                 else:
-                    sauvegarder_matrice_affinites(affinites_admin)
-                    st.success("Configuration enregistrée !")
+                    sauvegarder_matrice_affinites(config_admin)
+                    st.success("Configuration et Deadline enregistrées ! (L'application va se recharger)")
+                    time.sleep(1)
+                    st.rerun()
 
     with tab_gen:
         st.subheader("Lancer l'Optimisation Mathématique")
