@@ -258,8 +258,10 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
                     start_var = Y[j, creneaux_globaux[0]]
                 else:
                     start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
-                    if autorise_micro and i >= 3:
-                        start_var -= Y[j, creneaux_globaux[i-3]]
+                    # 🛑 CORRECTIF MICRO-SESSION : On vérifie l'état juste avant la pause de 30 min.
+                    slots_30m = int(30 / resolution)
+                    if autorise_micro and i >= slots_30m + 1:
+                        start_var -= Y[j, creneaux_globaux[i - slots_30m - 1]]
                 for k in range(1, min_slots):
                     prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
@@ -558,7 +560,6 @@ if not est_admin:
                             "annee_cible": target_year
                         }
 
-                        # DÉCOUPEUR AUTOMATIQUE DE MINUIT
                         if debut_str > fin_str and fin_str != "00:00":
                             dispo_1 = base_dispo.copy()
                             dispo_1["id"] = str(uuid.uuid4())
