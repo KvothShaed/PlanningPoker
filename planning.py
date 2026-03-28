@@ -24,7 +24,7 @@ if 'assignations_forcees' not in st.session_state:
     st.session_state.assignations_forcees = []
 
 # ==========================================
-# INITIALISATION DE FIREBASE (Déplacé en haut)
+# INITIALISATION DE FIREBASE 
 # ==========================================
 if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
@@ -46,7 +46,7 @@ def charger_matrice_affinites():
         "50": {"Planning 250": 1, "Planning 100": 1, "Planning 50": 3},
         "pause_interdite_min": 6,
         "repos_nuit_min": 10,
-        "deadline_day": 5, # 5 = Samedi par défaut
+        "deadline_day": 5, 
         "deadline_hour": 12,
         "deadline_minute": 0
     }
@@ -74,7 +74,6 @@ def get_planning_context(config):
     days_to_deadline = dead_day - current_weekday
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Calcul de la deadline exacte pour la semaine en cours
     deadline_dt = today_start + timedelta(days=days_to_deadline, hours=dead_hour, minutes=dead_min)
     
     if now < deadline_dt:
@@ -254,29 +253,41 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             min_slots = int(d_cible.get("t_min_base", 60) / resolution)
             break_slots = int(d_cible.get("break_min_heavy", 30) / resolution) 
             autorise_micro = d_cible.get("micro_session_ok", False)
+            slots_30m = int(30 / resolution)
 
             fenetre_24 = min(slots_dans_24h, len(creneaux_globaux) - i)
             if fenetre_24 > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_24)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
-            if max_slots > 0 and break_slots > 0:
-                fenetre_break = max_slots + break_slots
-                if i + fenetre_break <= len(creneaux_globaux):
-                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_break)) <= max_slots, f"Break_{j}_{i}"
-            elif max_slots > 0:
-                if i + max_slots < len(creneaux_globaux):
-                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
+            if max_slots > 0 and i + max_slots < len(creneaux_globaux):
+                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"MaxSession_{j}_{i}"
 
-            if min_slots > 1 and i + min_slots <= len(creneaux_globaux):
-                if i == 0:
-                    start_var = Y[j, creneaux_globaux[0]]
-                else:
-                    start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
-                    slots_30m = int(30 / resolution)
-                    if autorise_micro and i >= slots_30m + 1:
-                        start_var -= Y[j, creneaux_globaux[i - slots_30m - 1]]
+            # --- NOUVELLE LOGIQUE STRICTE : SESSION MINIMUM ---
+            if min_slots > 1:
                 for k in range(1, min_slots):
-                    prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
+                    if i + k < len(creneaux_globaux):
+                        y_prev = Y[j, creneaux_globaux[i-1]] if i > 0 else 0
+                        y_next = Y[j, creneaux_globaux[i+k]]
+                        
+                        if autorise_micro and k == slots_30m:
+                            if i >= slots_30m + 1:
+                                prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next - (k - 1) <= Y[j, creneaux_globaux[i - slots_30m - 1]], f"MicroSession_Prev_{j}_{i}"
+                            else:
+                                prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next <= k - 1, f"Forbid_Micro_Start_{j}_{i}"
+                        else:
+                            prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next <= k - 1, f"MinSession_{j}_{i}_{k}"
+
+            # --- NOUVELLE LOGIQUE STRICTE : PAUSE MINIMUM ---
+            if break_slots > 1 and i > 0:
+                for k in range(1, break_slots):
+                    if i + k < len(creneaux_globaux):
+                        if autorise_micro and k == slots_30m:
+                            if i + k + slots_30m < len(creneaux_globaux):
+                                prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] - 1 <= 1 - Y[j, creneaux_globaux[i+k+slots_30m]], f"MicroBreak_Next_{j}_{i}"
+                            else:
+                                prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] <= 1, f"Forbid_MicroBreak_End_{j}_{i}"
+                        else:
+                            prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] <= 1, f"MinBreak_{j}_{i}_{k}"
 
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
@@ -558,7 +569,6 @@ if not est_admin:
                 elif not jours_choisis:
                     st.error("Veuillez sélectionner au moins un jour.")
                 else:
-                    jours_semaine_ref = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
                     for j in jours_choisis:
                         base_dispo = {
                             "nom": nom_joueur.strip(),
@@ -585,8 +595,8 @@ if not est_admin:
                             ajouter_dispo(dispo_1)
                             
                             if j != "Dimanche":
-                                idx_jour = jours_semaine_ref.index(j)
-                                jour_suivant = jours_semaine_ref[(idx_jour + 1) % 7]
+                                idx_jour = JOURS_SEMAINE_FR.index(j)
+                                jour_suivant = JOURS_SEMAINE_FR[(idx_jour + 1) % 7]
                                 
                                 dispo_2 = base_dispo.copy()
                                 dispo_2["id"] = str(uuid.uuid4())
@@ -724,7 +734,7 @@ if est_admin:
         if donnees_semaine:
             df = pd.DataFrame(donnees_semaine)
             
-            colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj", "semaine_cible", "annee_cible"]
+            colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj", "semaine_cible", "annee_cible", "jours_off"]
             df = df.drop(columns=[c for c in colonnes_a_ignorer if c in df.columns])
             
             if not df.empty:
