@@ -252,42 +252,28 @@ def optimiser_planning_hebdo(donnees_totales, resolution, assignations_forcees, 
             max_slots = int(d_cible.get("t_max_affile", 120) / resolution)
             min_slots = int(d_cible.get("t_min_base", 60) / resolution)
             break_slots = int(d_cible.get("break_min_heavy", 30) / resolution) 
-            autorise_micro = d_cible.get("micro_session_ok", False)
-            slots_30m = int(30 / resolution)
 
             fenetre_24 = min(slots_dans_24h, len(creneaux_globaux) - i)
             if fenetre_24 > max_slots_24h:
                 prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_24)) <= max_slots_24h, f"Glissant_24h_{j}_{i}"
 
-            if max_slots > 0 and i + max_slots < len(creneaux_globaux):
-                prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"MaxSession_{j}_{i}"
+            # RETOUR A L'ANCIENNE RÈGLE DE DENSITÉ (Fenêtre Glissante Rapide)
+            if max_slots > 0 and break_slots > 0:
+                fenetre_break = max_slots + break_slots
+                if i + fenetre_break <= len(creneaux_globaux):
+                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(fenetre_break)) <= max_slots, f"Break_{j}_{i}"
+            elif max_slots > 0:
+                if i + max_slots < len(creneaux_globaux):
+                    prob += pulp.lpSum(Y[j, creneaux_globaux[i+k]] for k in range(max_slots + 1)) <= max_slots, f"Max_{j}_{i}"
 
-            # --- NOUVELLE LOGIQUE STRICTE : SESSION MINIMUM ---
-            if min_slots > 1:
+            # RETOUR A L'ANCIENNE RÈGLE DE MINIMUM (Sans exception)
+            if min_slots > 1 and i + min_slots <= len(creneaux_globaux):
+                if i == 0:
+                    start_var = Y[j, creneaux_globaux[0]]
+                else:
+                    start_var = Y[j, creneaux_globaux[i]] - Y[j, creneaux_globaux[i-1]]
                 for k in range(1, min_slots):
-                    if i + k < len(creneaux_globaux):
-                        y_prev = Y[j, creneaux_globaux[i-1]] if i > 0 else 0
-                        y_next = Y[j, creneaux_globaux[i+k]]
-                        
-                        if autorise_micro and k == slots_30m:
-                            if i >= slots_30m + 1:
-                                prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next - (k - 1) <= Y[j, creneaux_globaux[i - slots_30m - 1]], f"MicroSession_Prev_{j}_{i}"
-                            else:
-                                prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next <= k - 1, f"Forbid_Micro_Start_{j}_{i}"
-                        else:
-                            prob += pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) - y_prev - y_next <= k - 1, f"MinSession_{j}_{i}_{k}"
-
-            # --- NOUVELLE LOGIQUE STRICTE : PAUSE MINIMUM ---
-            if break_slots > 1 and i > 0:
-                for k in range(1, break_slots):
-                    if i + k < len(creneaux_globaux):
-                        if autorise_micro and k == slots_30m:
-                            if i + k + slots_30m < len(creneaux_globaux):
-                                prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] - 1 <= 1 - Y[j, creneaux_globaux[i+k+slots_30m]], f"MicroBreak_Next_{j}_{i}"
-                            else:
-                                prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] <= 1, f"Forbid_MicroBreak_End_{j}_{i}"
-                        else:
-                            prob += Y[j, creneaux_globaux[i-1]] - pulp.lpSum(Y[j, creneaux_globaux[i+m]] for m in range(k)) + Y[j, creneaux_globaux[i+k]] <= 1, f"MinBreak_{j}_{i}_{k}"
+                    prob += start_var <= Y[j, creneaux_globaux[i+k]], f"Min_{j}_{i}_{k}"
 
     h_pause_max = matrice_affinites.get("pause_interdite_min", 6)
     h_nuit_min = matrice_affinites.get("repos_nuit_min", 10)
@@ -535,9 +521,6 @@ if not est_admin:
                     creneau_min_base = st.number_input("Temps minimum par session (📌)", value=60, step=30)
                 with c2: 
                     break_min_heavy = st.number_input("Pause min après grosse session (📌)", value=60, step=15)
-
-                st.markdown("#### ⚡ Exception : Micro-session")
-                micro_session_ok = st.checkbox("Autoriser une session courte (30min) à la suite d'un break court (30 min)", value=True)
                     
                 liste_heures = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)] + ["23:59"]
 
@@ -578,7 +561,6 @@ if not est_admin:
                             "break_min_heavy": break_min_heavy,
                             "heures_max_hebdo": heures_max_hebdo,
                             "heures_max_jour": heures_max_jour,
-                            "micro_session_ok": micro_session_ok,
                             "repas_debut": repas_debut,
                             "repas_fin": repas_fin,
                             "repas_duree": repas_duree,
@@ -632,12 +614,11 @@ if not est_admin:
                                 d["t_max_affile"] = temps_max_affile
                                 d["t_min_base"] = creneau_min_base
                                 d["break_min_heavy"] = break_min_heavy
-                                d["micro_session_ok"] = micro_session_ok
                                 d["repas_debut"] = repas_debut
                                 d["repas_fin"] = repas_fin
                                 d["repas_duree"] = repas_duree
                                 
-                                for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit"]:
+                                for old_key in ["break_max_cond", "t_min_adj", "intervalle_nuit", "micro_session_ok", "jours_off"]:
                                     if old_key in d: del d[old_key]
                                     
                                 ajouter_dispo(d)
@@ -700,8 +681,6 @@ if not est_admin:
                     ]
                     if d.get('repas_duree', 0) > 0:
                         parts.append(f"🍔 {d.get('repas_duree')}m ({d.get('repas_debut')}-{d.get('repas_fin')})")
-                    if d.get('micro_session_ok', False):
-                        parts.append("⚡ Micro: Oui")
                         
                     st.markdown(" | ".join(parts))
                 
@@ -734,12 +713,12 @@ if est_admin:
         if donnees_semaine:
             df = pd.DataFrame(donnees_semaine)
             
-            colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj", "semaine_cible", "annee_cible", "jours_off"]
+            colonnes_a_ignorer = ["intervalle_nuit", "break_max_cond", "t_min_adj", "semaine_cible", "annee_cible", "jours_off", "micro_session_ok"]
             df = df.drop(columns=[c for c in colonnes_a_ignorer if c in df.columns])
             
             if not df.empty:
                 cols = df.columns.tolist()
-                first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'micro_session_ok', 'repas_debut', 'repas_fin', 'repas_duree']
+                first_cols = ['nom', 'jour', 'debut', 'fin', 'limite_max', 'heures_max_hebdo', 'heures_max_jour', 't_max_affile', 't_min_base', 'break_min_heavy', 'repas_debut', 'repas_fin', 'repas_duree']
                 
                 for fc in first_cols:
                     if fc not in df.columns: df[fc] = None
